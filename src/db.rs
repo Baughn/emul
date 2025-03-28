@@ -1,13 +1,13 @@
 use crate::config::LOG_HISTORY_LINES;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{path::Path, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
-    pub timestamp: DateTime<Utc>,
+    //pub timestamp: DateTime<Utc>,
     pub channel: String,
     pub nick: String,
     pub message: String,
@@ -157,10 +157,10 @@ pub fn get_channel_log(conn: &Connection, channel: &str) -> Result<Vec<LogEntry>
             ) ORDER BY timestamp ASC",
     )?;
     let entry_iter = stmt.query_map(params![channel, limit], |row| {
-        let timestamp_secs: i64 = row.get(0)?;
+        //let timestamp_secs: i64 = row.get(0)?;
         Ok(LogEntry {
             // Use timestamp_opt for safe conversion
-            timestamp: DateTime::from_timestamp(timestamp_secs, 0).unwrap_or_else(|| Utc::now()), // Fallback if invalid
+            //timestamp: DateTime::from_timestamp(timestamp_secs, 0).unwrap_or_else(|| Utc::now()), // Fallback if invalid
             channel: channel.clone(),
             nick: row.get(1)?,
             message: row.get(2)?,

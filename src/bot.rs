@@ -1,11 +1,10 @@
 use crate::ai_handler; // Use crate::db for functions
 use crate::config::{Config, RANDOM_INTERJECT_CHANCE};
-use crate::db::{self, DbConnection, LogEntry}; // Import LogEntry type
+use crate::db::{self, DbConnection}; // Import LogEntry type
 use anyhow::{Result, anyhow};
 use futures::prelude::*;
 use irc::client::prelude::*; // Includes Client, Message, Command etc.
 use rand::prelude::*;
-use tracing_subscriber::fmt::init;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,14 +22,12 @@ struct BotState {
 pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
     tracing::info!(server = %config.server, port = %config.port, nick = %config.nickname, "Connecting to IRC");
 
-    let initial_db_channels = db::get_channels(&*db_conn.lock().await)?;
-
     let irc_config = irc::client::data::Config {
         nickname: Some(config.nickname.clone()),
+        nick_password: config.nickserv_password.clone(),
         server: Some(config.server.clone()),
         port: Some(config.port),
         use_tls: Some(config.use_tls),
-        channels: initial_db_channels, // Join channels from config
         version: Some("EmulBotRs v0.1 - https://github.com/baughn/emulbot".to_string()), // Be polite!
         ..irc::client::data::Config::default()
     };
@@ -43,7 +40,6 @@ pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
         db_conn,
         current_channels: Arc::new(Mutex::new(HashSet::new())),
         prompt_path: Arc::new(Config::load()?.prompt_path()), // Load prompt path here
-                                                              // Initialize Gemini stuff here if needed
     };
 
     let mut stream = client.stream()?;
@@ -80,30 +76,20 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
     // Log raw messages for debugging if needed
     tracing::trace!(raw_message = ?message, "Received message");
 
-    let nick = message.source_nickname().unwrap_or("").to_lowercase(); // Get sender nick
-
     match message.command {
-        // Command::WELCOME => {
-        //     tracing::info!("Connected successfully!");
-        //     // Identify with NickServ if password provided
-        //     if let Some(pass) = &state.config.nickserv_password {
-        //         tracing::info!("Identifying with NickServ...");
-        //         client.send_privmsg("NickServ", format!("IDENTIFY {}", pass))?;
-        //         // Short delay for NickServ
-        //         tokio::time::sleep(Duration::from_secs(3)).await;
-        //     }
-        //      // Join channels stored in DB (might be redundant if initial_channels worked, but safe)
-        //     let channels = db::get_channels(&*state.db_conn.lock().await).await?;
-        //     let mut current_chans = state.current_channels.lock().await;
-        //     for channel in channels {
-        //          if !current_chans.contains(&channel) { // Avoid re-joining if already known
-        //              tracing::info!(%channel, "Joining channel from DB on WELCOME");
-        //              if let Err(e) = client.send_join(&channel) {
-        //                  tracing::error!(%channel, "Failed to send JOIN command: {}", e);
-        //              }
-        //         }
-        //     }
-        // }
+        Command::NOTICE(_, ref msg) => {
+            let source = message.source_nickname().unwrap_or("unknown");
+            tracing::info!(from = %source, %msg, "Received NOTICE");
+            // Handle NickServ notices.
+            if source == "NickServ" && msg.contains("you are now recognized") {
+                // *Now* we can join our channels.
+                tracing::info!("NickServ recognized us, joining channels");
+                let channels = db::get_channels(&*state.db_conn.lock().await)?;
+                for channel in channels {
+                    client.send_join(&channel)?;
+                }
+            }
+        },
         Command::NICK(ref new_nick) => {
             let old_nick = message.source_nickname().unwrap_or("");
             // If *our* nick changed (e.g., due to conflict)
@@ -159,7 +145,7 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
                     || msg_lower.split_whitespace().next() == Some(&bot_nick_lower);
 
                 let should_trigger_ai =
-                    is_addressed || rand::thread_rng().gen_bool(RANDOM_INTERJECT_CHANCE);
+                    is_addressed || rand::rng().random_bool(RANDOM_INTERJECT_CHANCE);
 
                 if should_trigger_ai {
                     // Spawn AI task
@@ -179,10 +165,6 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
         // Handle other commands if needed (PING/PONG is automatic)
         Command::PING(ref server1, server2) => {
             tracing::debug!(%server1, ?server2, "Received PING, library should handle PONG");
-        }
-        Command::NOTICE(ref target, ref msg) => {
-            tracing::info!(%target, %msg, "Received NOTICE");
-            // Could handle NickServ notices here etc.
         }
 
         _ => { /* Ignore other commands for now */ }
