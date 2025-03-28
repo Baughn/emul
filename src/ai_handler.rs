@@ -56,7 +56,7 @@ pub async fn get_ai_response(
 }
 
 async fn call_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}", dotenvy::var("GEMINI_API_KEY")?);
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-exp-03-25:generateContent?key={}", dotenvy::var("GEMINI_API_KEY")?);
     let client = reqwest::Client::new();
 
     let body = json!({

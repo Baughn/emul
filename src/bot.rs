@@ -1,5 +1,5 @@
 use crate::ai_handler; // Use crate::db for functions
-use crate::config::{Config, RANDOM_INTERJECT_CHANCE};
+use crate::config::{Config, RANDOM_INTERJECT_CHANCE, RANDOM_INTERJECT_CHANCE_IF_MENTIONED};
 use crate::db::{self, DbConnection}; // Import LogEntry type
 use anyhow::{Result, anyhow};
 use futures::prelude::*;
@@ -142,7 +142,8 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
                 let msg_lower = msg.to_lowercase();
                 let is_addressed = msg_lower.starts_with(&format!("{}:", bot_nick_lower))
                     || msg_lower.starts_with(&format!("{},", bot_nick_lower))
-                    || msg_lower.split_whitespace().next() == Some(&bot_nick_lower);
+                    || msg_lower.split_whitespace().next() == Some(&bot_nick_lower)
+                    || (msg.to_lowercase().contains(format!(" {}", bot_nick_lower).as_str()) && rand::rng().random_bool(RANDOM_INTERJECT_CHANCE_IF_MENTIONED));
 
                 let should_trigger_ai =
                     is_addressed || rand::rng().random_bool(RANDOM_INTERJECT_CHANCE);
@@ -209,6 +210,9 @@ async fn handle_ai_request(
     match ai_result {
         Ok(response) => {
             tracing::info!(%channel, "Sending AI response");
+            // Store the AI response in the database for later turns.
+            db::log_message(&*state.db_conn.lock().await, &channel, &state.config.nickname, &response)
+                .unwrap_or_else(|e| tracing::error!("Failed to log AI response: {:?}", e));
             // Split long messages if necessary (IRC limit is ~512 bytes including overhead)
             const MAX_LEN: usize = 430; // Conservative limit for message part
             let mut remaining_msg = response.as_str();

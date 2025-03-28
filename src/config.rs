@@ -6,6 +6,7 @@ pub const DB_FILE_PATH: &str = "emul_bot_memory.sqlite";
 pub const PROMPT_FILE_PATH: &str = "vorpal_bunny_prompt.txt";
 pub const LOG_HISTORY_LINES: usize = 500;
 pub const RANDOM_INTERJECT_CHANCE: f64 = 0.02; // 2% chance
+pub const RANDOM_INTERJECT_CHANCE_IF_MENTIONED: f64 = 0.2;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
