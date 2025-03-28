@@ -30,11 +30,6 @@ pub struct Config {
     #[arg(long, env = "NICKSERV_PASSWORD")]
     pub nickserv_password: Option<String>,
 
-    /// Channels to attempt to join on startup (comma-separated)
-    /// Note: Dynamic joining via commands is also supported
-    #[arg(long, value_delimiter = ',')]
-    pub initial_channels: Vec<String>,
-
     /// Use TLS (SSL) for the connection
     #[arg(long, default_value_t = true)]
     pub use_tls: bool,

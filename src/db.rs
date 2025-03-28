@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub timestamp: DateTime<Utc>,
+    pub channel: String,
     pub nick: String,
     pub message: String,
 }
@@ -160,6 +161,7 @@ pub fn get_channel_log(conn: &Connection, channel: &str) -> Result<Vec<LogEntry>
         Ok(LogEntry {
             // Use timestamp_opt for safe conversion
             timestamp: DateTime::from_timestamp(timestamp_secs, 0).unwrap_or_else(|| Utc::now()), // Fallback if invalid
+            channel: channel.clone(),
             nick: row.get(1)?,
             message: row.get(2)?,
         })

@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow};
 use futures::prelude::*;
 use irc::client::prelude::*; // Includes Client, Message, Command etc.
 use rand::prelude::*;
+use tracing_subscriber::fmt::init;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,12 +23,14 @@ struct BotState {
 pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
     tracing::info!(server = %config.server, port = %config.port, nick = %config.nickname, "Connecting to IRC");
 
+    let initial_db_channels = db::get_channels(&*db_conn.lock().await)?;
+
     let irc_config = irc::client::data::Config {
         nickname: Some(config.nickname.clone()),
         server: Some(config.server.clone()),
         port: Some(config.port),
         use_tls: Some(config.use_tls),
-        channels: config.initial_channels.clone(), // Initial join attempt
+        channels: initial_db_channels, // Join channels from config
         version: Some("EmulBotRs v0.1 - https://github.com/baughn/emulbot".to_string()), // Be polite!
         ..irc::client::data::Config::default()
     };
@@ -45,18 +48,6 @@ pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
 
     let mut stream = client.stream()?;
     let client = Arc::new(client);
-
-    // --- Initial Setup ---
-    // Try joining channels from DB after potential initial connection/welcome
-    // We'll also do this on WELCOME event for robustness
-    let initial_db_channels = db::get_channels(&*state.db_conn.lock().await)?;
-    for channel in initial_db_channels {
-        if !state.config.initial_channels.contains(&channel) {
-            // Avoid duplicate join attempts if already in config
-            tracing::info!(%channel, "Queueing join from database");
-            client.send_join(&channel)?;
-        }
-    }
 
     // --- Main Event Loop ---
     while let Some(message_result) = stream.next().await {

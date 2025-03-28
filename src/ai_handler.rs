@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 fn format_history(history: &[LogEntry]) -> String {
     history
         .iter()
-        .map(|entry| format!("{}: {}", entry.nick, entry.message))
+        .map(|entry| format!("{} {}: {}", entry.channel, entry.nick, entry.message))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -50,6 +50,7 @@ pub async fn get_ai_response(
         system_prompt, formatted_history, triggering_nick, triggering_message
     );
     tracing::debug!(context_size = full_context.len(), "Constructed AI context");
+    tracing::trace!(context = %full_context, "Full AI context");
 
     // 4. <<<<< YOUR GEMINI CALL GOES HERE >>>>>
     //    - Use your preferred Rust HTTP client (reqwest, etc.) or specific Gemini SDK if available.
