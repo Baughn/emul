@@ -213,26 +213,14 @@ async fn handle_ai_request(
             // Store the AI response in the database for later turns.
             db::log_message(&*state.db_conn.lock().await, &channel, &state.config.nickname, &response)
                 .unwrap_or_else(|e| tracing::error!("Failed to log AI response: {:?}", e));
-            // Split long messages if necessary (IRC limit is ~512 bytes including overhead)
-            const MAX_LEN: usize = 430; // Conservative limit for message part
-            let mut remaining_msg = response.as_str();
-            while !remaining_msg.is_empty() {
-                let (chunk, rest) = remaining_msg.split_at(
-                    remaining_msg
-                        .char_indices()
-                        .map(|(i, _)| i)
-                        .find(|&i| i >= MAX_LEN)
-                        .unwrap_or(remaining_msg.len()),
-                );
-                if let Err(e) = sender.send_privmsg(&channel, chunk) {
+            let lines = split_response(430, &response);
+            for line in lines {
+                if let Err(e) = sender.send_privmsg(&channel, line) {
                     tracing::error!(%channel, "Failed to send AI response chunk: {}", e);
                     // Avoid infinite loops if sending fails repeatedly
                     break;
                 }
-                remaining_msg = rest;
-                if !remaining_msg.is_empty() {
-                    tokio::time::sleep(Duration::from_millis(600)).await; // Small delay between lines
-                }
+                tokio::time::sleep(Duration::from_millis(600)).await; // Small delay between lines
             }
         }
         Err(e) => {
@@ -416,4 +404,49 @@ async fn handle_admin_command(
     }
 
     Ok(())
+}
+
+
+/// Split a long response into multiple messages.
+/// This means one message per line, but also splitting long lines.
+fn split_response(limit: usize, response: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    for line in response.lines() {
+        let mut remaining = line;
+        while !remaining.is_empty() {
+            if remaining.len() <= limit {
+                parts.push(remaining);
+                break;
+            } else {
+                // Thius is the hard bit. Find the last space before the limit, if any; otherwise, split at the limit.
+                let split_at = remaining[..limit].rfind(' ').unwrap_or(limit);
+                parts.push(&remaining[..split_at]);
+                remaining = &remaining[split_at..].trim_start();
+            }
+        }
+    }
+    parts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_split_response() {
+        let response = "This is a test response. It should be split into multiple\nmessages.";
+        let parts = split_response(500, response);
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "This is a test response. It should be split into multiple");
+        assert_eq!(parts[1], "messages.");
+    }
+
+    #[test]
+    fn test_split_long_line() {
+        let response = "This is a test response. It should be split into multiple messages. This line is long enough to be split into multiple parts.";
+        let parts = split_response(60, response);
+        assert_eq!(parts[0], "This is a test response. It should be split into multiple");
+        assert_eq!(parts[1], "messages. This line is long enough to be split into");
+        assert_eq!(parts[2], "multiple parts.");
+    }
 }

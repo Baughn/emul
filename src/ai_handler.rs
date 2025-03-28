@@ -52,6 +52,7 @@ pub async fn get_ai_response(
     // 4. Call the Gemini API with the full context
     let response = call_gemini(&system_prompt, &full_context).await?;
     tracing::info!(response_size = response.len(), "Received AI response");
+    tracing::info!(response);
     Ok(response)
 }
 
