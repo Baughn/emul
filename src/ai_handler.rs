@@ -1,5 +1,6 @@
 use crate::db::LogEntry;
 use anyhow::{Result, anyhow};
+use serde_json::json;
 
 /// Formats chat history for the AI prompt.
 /// Consider adding timestamps or adjusting formatting as needed for your AI.
@@ -22,10 +23,6 @@ async fn read_prompt_file(prompt_path: &std::path::Path) -> Result<String> {
     })
 }
 
-// *************************************************************************
-// * <<<<< IMPORTANT >>>>>                        *
-// * This is the function you need to implement with your Gemini API calls.*
-// *************************************************************************
 pub async fn get_ai_response(
     channel: &str,
     triggering_nick: &str,
@@ -46,26 +43,57 @@ pub async fn get_ai_response(
     // 3. Construct the full prompt/context for Gemini
     //    Combine system_prompt, formatted_history, triggering_nick, triggering_message
     let full_context = format!(
-        "System Prompt:\n{}\n\nHistory:\n{}\n\n Current Trigger from {}:\n{}",
-        system_prompt, formatted_history, triggering_nick, triggering_message
+        "History:\n{}\n\n Current Trigger from {}:\n{}",
+        formatted_history, triggering_nick, triggering_message
     );
     tracing::debug!(context_size = full_context.len(), "Constructed AI context");
     tracing::trace!(context = %full_context, "Full AI context");
 
-    // 4. <<<<< YOUR GEMINI CALL GOES HERE >>>>>
-    //    - Use your preferred Rust HTTP client (reqwest, etc.) or specific Gemini SDK if available.
-    //    - Send the constructed prompt/context to the Gemini API.
-    //    - Handle the API response (parsing JSON, extracting the text).
-    //    - Handle API errors.
-    //    - Return Ok(ai_text_response) or Err(error).
+    // 4. Call the Gemini API with the full context
+    let response = call_gemini(&system_prompt, &full_context).await?;
+    tracing::info!(response_size = response.len(), "Received AI response");
+    Ok(response)
+}
 
-    // --- Replace this placeholder with your actual Gemini logic ---
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await; // Simulate API call
-    tracing::warn!("AI handler is using placeholder logic!");
-    Ok(format!(
-        "Placeholder response! {triggering_nick} said '{triggering_message}' in {channel}. I need my Gemini brain connected!"
-    ))
-    // Example of returning an error:
-    // Err(anyhow!("Gemini API call failed: timeout"))
-    // -------------------------------------------------------------
+async fn call_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}", dotenvy::var("GEMINI_API_KEY")?);
+    let client = reqwest::Client::new();
+
+    let body = json!({
+        "contents": [{
+            "role": "user",
+            "parts": [{
+                "text": prompt
+            }]
+        }],
+        "systemInstruction": {
+            "parts": [{
+                "text": system_prompt
+            }]
+        },
+        "generationConfig": {
+            "responseMimeType": "text/plain"
+        }
+    });
+
+    let response: serde_json::Value = client.post(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    // The response should be at .candidates[0].content.parts.text, but we'll be defensive.
+    let response_text = response
+        .get("candidates")
+        .and_then(|candidates| candidates.get(0))
+        .and_then(|candidate| candidate.get("content"))
+        .and_then(|content| content.get("parts"))
+        .and_then(|parts| parts.get(0))
+        .and_then(|part| part.get("text"))
+        .and_then(|text| text.as_str())
+        .ok_or_else(|| anyhow!("Invalid response from Gemini API"))?;
+
+    Ok(response_text.to_string())
 }

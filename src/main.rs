@@ -14,6 +14,9 @@ async fn main() -> Result<()> {
         .with(EnvFilter::from_default_env().add_directive("info".parse()?)) // Default to info for our crate
         .init();
 
+    // Setup rustls
+    rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
+
     // Load Configuration
     let config = config::Config::load().context("Failed to load configuration")?;
     tracing::debug!(?config, "Configuration loaded");
