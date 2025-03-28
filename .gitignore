@@ -1,2 +1,3 @@
 /target
 .env
+emul_bot_memory.sqlite

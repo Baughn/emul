@@ -135,7 +135,7 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
                 // Public message in a channel
                 let channel = target;
                 // Log the message first
-                db::log_message(&*state.db_conn.lock().await, &channel, source_nick, &msg)?;
+                db::log_message(&*state.db_conn.lock().await, channel, source_nick, msg)?;
 
                 // Check if addressed or random chance
                 let bot_nick_lower = state.config.nickname.to_lowercase();
@@ -255,17 +255,17 @@ async fn handle_admin_command(
     tracing::info!(from = %nick, %msg, "Admin command received");
 
     // Check if sender is admin
-    if !db::is_admin(&*state.db_conn.lock().await, &nick)? {
+    if !db::is_admin(&*state.db_conn.lock().await, nick)? {
         tracing::warn!(%nick, "Non-admin PM command attempt");
         client.send_privmsg(
-            &nick,
+            nick,
             "Sorry, I only take commands from registered admins, desu~",
         )?;
         return Ok(());
     }
 
-    let parts: Vec<&str> = msg.trim().split_whitespace().collect();
-    let command = parts.get(0).map(|s| s.to_lowercase());
+    let parts: Vec<&str> = msg.split_whitespace().collect();
+    let command = parts.first().map(|s| s.to_lowercase());
 
     match command.as_deref() {
         Some("!join") => {
@@ -278,15 +278,15 @@ async fn handle_admin_command(
                 if db::add_channel(&*state.db_conn.lock().await, &channel)? {
                     tracing::info!(admin = %nick, %channel, "Added channel via command. Joining.");
                     client.send_privmsg(
-                        &nick,
-                        &format!("Okay! Added {} and joining now!", channel),
+                        nick,
+                        format!("Okay! Added {} and joining now!", channel),
                     )?;
                     client.send_join(&channel)?; // Attempt to join immediately
                 } else {
-                    client.send_privmsg(&nick, &format!("I already know about {}!", channel))?;
+                    client.send_privmsg(nick, format!("I already know about {}!", channel))?;
                 }
             } else {
-                client.send_privmsg(&nick, "Usage: !join #channel")?;
+                client.send_privmsg(nick, "Usage: !join #channel")?;
             }
         }
         Some("!part") => {
@@ -299,8 +299,8 @@ async fn handle_admin_command(
                 if db::remove_channel(&*state.db_conn.lock().await, &channel)? {
                     tracing::info!(admin = %nick, %channel, "Removed channel via command. Parting.");
                     client.send_privmsg(
-                        &nick,
-                        &format!(
+                        nick,
+                        format!(
                             "Got it! Leaving {} and won't rejoin automatically.",
                             channel
                         ),
@@ -311,8 +311,8 @@ async fn handle_admin_command(
                     let mut current = state.current_channels.lock().await;
                     if current.contains(&channel) {
                         client.send_privmsg(
-                            &nick,
-                            &format!(
+                            nick,
+                            format!(
                                 "Okay, leaving {} for this session (wasn't set to auto-join).",
                                 channel
                             ),
@@ -321,13 +321,13 @@ async fn handle_admin_command(
                         current.remove(&channel); // Update runtime state
                     } else {
                         client.send_privmsg(
-                            &nick,
-                            &format!("I wasn't set to auto-join {} anyway.", channel),
+                            nick,
+                            format!("I wasn't set to auto-join {} anyway.", channel),
                         )?;
                     }
                 }
             } else {
-                client.send_privmsg(&nick, "Usage: !part #channel")?;
+                client.send_privmsg(nick, "Usage: !part #channel")?;
             }
         }
         Some("!add_admin") => {
@@ -335,79 +335,79 @@ async fn handle_admin_command(
                 if db::add_admin(&*state.db_conn.lock().await, new_admin)? {
                     tracing::info!(admin = %nick, new_admin, "Added new admin");
                     client
-                        .send_privmsg(&nick, &format!("Okay, '{}' is now an admin!", new_admin))?;
+                        .send_privmsg(nick, format!("Okay, '{}' is now an admin!", new_admin))?;
                 } else {
                     client.send_privmsg(
-                        &nick,
-                        &format!("Failed to add '{}' (maybe already an admin?).", new_admin),
+                        nick,
+                        format!("Failed to add '{}' (maybe already an admin?).", new_admin),
                     )?;
                 }
             } else {
-                client.send_privmsg(&nick, "Usage: !add_admin <nickname>")?;
+                client.send_privmsg(nick, "Usage: !add_admin <nickname>")?;
             }
         }
         Some("!del_admin") => {
             if let Some(admin_to_remove) = parts.get(1) {
-                if admin_to_remove.eq_ignore_ascii_case(&nick) {
-                    client.send_privmsg(&nick, "You can't remove yourself, silly!")?;
+                if admin_to_remove.eq_ignore_ascii_case(nick) {
+                    client.send_privmsg(nick, "You can't remove yourself, silly!")?;
                     return Ok(());
                 }
                 if db::remove_admin(&*state.db_conn.lock().await, admin_to_remove)? {
                     tracing::info!(admin = %nick, removed = admin_to_remove, "Removed admin");
                     client.send_privmsg(
-                        &nick,
-                        &format!("Okay, '{}' is no longer an admin.", admin_to_remove),
+                        nick,
+                        format!("Okay, '{}' is no longer an admin.", admin_to_remove),
                     )?;
                 } else {
                     client.send_privmsg(
-                        &nick,
-                        &format!(
+                        nick,
+                        format!(
                             "Failed to remove '{}' (maybe not an admin?).",
                             admin_to_remove
                         ),
                     )?;
                 }
             } else {
-                client.send_privmsg(&nick, "Usage: !del_admin <nickname>")?;
+                client.send_privmsg(nick, "Usage: !del_admin <nickname>")?;
             }
         }
         Some("!admins") => match db::get_admins(&*state.db_conn.lock().await) {
             Ok(admins) => {
                 if admins.is_empty() {
-                    client.send_privmsg(&nick, "There are no registered admins!")?;
+                    client.send_privmsg(nick, "There are no registered admins!")?;
                 } else {
                     client.send_privmsg(
-                        &nick,
-                        &format!("Registered admins: {}", admins.join(", ")),
+                        nick,
+                        format!("Registered admins: {}", admins.join(", ")),
                     )?;
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to fetch admins: {:?}", e);
-                client.send_privmsg(&nick, "Oops, couldn't check the admin list right now.")?;
+                client.send_privmsg(nick, "Oops, couldn't check the admin list right now.")?;
             }
         },
         Some("!channels") => match db::get_channels(&*state.db_conn.lock().await) {
             Ok(channels) => {
                 if channels.is_empty() {
-                    client.send_privmsg(&nick, "I'm not set to auto-join any channels.")?;
+                    client.send_privmsg(nick, "I'm not set to auto-join any channels.")?;
                 } else {
                     client.send_privmsg(
-                        &nick,
-                        &format!("Auto-join channels: {}", channels.join(", ")),
+                        nick,
+                        format!("Auto-join channels: {}", channels.join(", ")),
                     )?;
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to fetch channels: {:?}", e);
-                client.send_privmsg(&nick, "Oops, couldn't check the channel list right now.")?;
+                client.send_privmsg(nick, "Oops, couldn't check the channel list right now.")?;
             }
         },
         Some("!help") => {
-            client.send_privmsg(&nick, "Admin commands: !join <#chan>, !part <#chan>, !add_admin <nick>, !del_admin <nick>, !admins, !channels, !help")?;
+            client.send_privmsg(nick, "Admin commands: !join <#chan>, !part <#chan>, !add_admin <nick>, !del_admin <nick>, !admins, !channels, !help")?;
         }
         _ => {
-            client.send_privmsg(&nick, "Hmm? Unknown command or format. Try !help.")?;
+            client.send_privmsg(nick, "Hmm? Unknown command or format. Try !help.")?;
         }
     }
 
