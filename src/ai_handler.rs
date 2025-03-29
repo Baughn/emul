@@ -1,5 +1,5 @@
 use crate::db::LogEntry;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, bail, Result};
 use serde_json::json;
 
 /// Formats chat history for the AI prompt.
@@ -23,7 +23,24 @@ async fn read_prompt_file(prompt_path: &std::path::Path) -> Result<String> {
     })
 }
 
-pub async fn get_ai_response(
+/// For a less obvious mention such as "I wonder what Emul thinks", this does a cheap check to see if Emul ought to respond.
+pub async fn chatbot_mentioned(
+    chatbot_name: &str,
+    triggering_message: &str,
+) -> Result<bool> {
+    let system_prompt = format!("You are {}. Check if the provided message is aimed at {}, or if it is merely a mention. Respond with a single word, \"respond\" or \"mention\".", chatbot_name, chatbot_name);
+    let response = fast_gemini(&system_prompt, triggering_message).await?;
+    tracing::trace!(response = %response, message = %triggering_message);
+    if response.contains("respond") {
+        Ok(true)
+    } else if response.contains("mention") {
+        Ok(false)
+    } else {
+        bail!("chatbot_mentioned failed to parse response")
+    }
+}
+
+pub async fn call_chatbot(
     channel: &str,
     triggering_nick: &str,
     triggering_message: &str,
@@ -64,17 +81,17 @@ pub async fn get_ai_response(
         )
     };
     tracing::debug!(context_size = full_context.len(), "Constructed AI context");
-    tracing::trace!(context = %full_context, "Full AI context");
+    tracing::trace!(context_lines = %full_context.lines().count(), "Context size");
 
     // 4. Call the Gemini API with the full context
-    let response = call_gemini(&system_prompt, &full_context).await?;
+    let response = smart_gemini(&system_prompt, &full_context).await?;
     tracing::info!(response_size = response.len(), "Received AI response");
     tracing::info!(response);
     Ok(response)
 }
 
-async fn call_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
-    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-exp-03-25:generateContent?key={}", dotenvy::var("GEMINI_API_KEY")?);
+async fn call_gemini(system_prompt: &str, prompt: &str, model_version: &str) -> Result<String> {
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model_version, dotenvy::var("GEMINI_API_KEY")?);
     let client = reqwest::Client::new();
 
     let body = json!({
@@ -114,4 +131,12 @@ async fn call_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("Invalid response from Gemini API"))?;
 
     Ok(response_text.to_string())
+}
+
+async fn smart_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
+    call_gemini(system_prompt, prompt, "gemini-2.5-pro-exp-03-25").await
+}
+
+async fn fast_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
+    call_gemini(system_prompt, prompt, "gemini-2.5-pro-exp-03-25").await
 }

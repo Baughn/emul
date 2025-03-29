@@ -148,7 +148,7 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
                     || msg_lower.starts_with(&format!("{},", bot_nick_lower))
                     || msg_lower.split_whitespace().next() == Some(&bot_nick_lower)
                     || (msg.to_lowercase().contains(format!(" {}", bot_nick_lower).as_str())
-                        && state.bn_interject_mention.should_interject());
+                        && (state.bn_interject_mention.should_interject() || ai_handler::chatbot_mentioned(&state.config.nickname, msg).await?));
 
                 let should_trigger_ai =
                     is_addressed || state.bn_interject.should_interject();
@@ -201,7 +201,7 @@ async fn handle_ai_request(
     let history = history_result.unwrap();
 
     // 2. Call the AI Handler (your implementation)
-    let ai_result = ai_handler::get_ai_response(
+    let ai_result = ai_handler::call_chatbot(
         &channel,
         &triggering_nick,
         &triggering_message,
