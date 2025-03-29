@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 
-pub const DB_FILE_PATH: &str = "emul_bot_memory.sqlite";
 pub const PROMPT_FILE_PATH: &str = "vorpal_bunny_prompt.txt";
 pub const LOG_HISTORY_LINES: usize = 500;
 pub const RANDOM_INTERJECT_CHANCE: f64 = 0.005;
@@ -34,6 +33,10 @@ pub struct Config {
     /// Use TLS (SSL) for the connection
     #[arg(long, default_value_t = true)]
     pub use_tls: bool,
+
+    /// Bot memory file
+    #[arg(long)]
+    pub db: String,
 }
 
 impl Config {
@@ -45,7 +48,7 @@ impl Config {
     }
 
     pub fn db_path(&self) -> PathBuf {
-        PathBuf::from(DB_FILE_PATH)
+        PathBuf::from(self.db.clone())
     }
 
     pub fn prompt_path(&self) -> PathBuf {

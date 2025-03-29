@@ -426,7 +426,7 @@ fn split_response(limit: usize, response: &str) -> Vec<&str> {
                 // Thius is the hard bit. Find the last space before the limit, if any; otherwise, split at the limit.
                 let split_at = remaining[..limit].rfind(' ').unwrap_or(limit);
                 parts.push(&remaining[..split_at]);
-                remaining = &remaining[split_at..].trim_start();
+                remaining = remaining[split_at..].trim_start();
             }
         }
     }
