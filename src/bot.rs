@@ -1,10 +1,10 @@
-use crate::ai_handler; // Use crate::db for functions
+use crate::ai_handler;
+use crate::bluenoise::BlueNoiseInterjecter;
 use crate::config::{Config, RANDOM_INTERJECT_CHANCE, RANDOM_INTERJECT_CHANCE_IF_MENTIONED};
 use crate::db::{self, DbConnection}; // Import LogEntry type
 use anyhow::{Result, anyhow};
 use futures::prelude::*;
 use irc::client::prelude::*; // Includes Client, Message, Command etc.
-use rand::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,6 +17,8 @@ struct BotState {
     db_conn: DbConnection,
     current_channels: Arc<Mutex<HashSet<String>>>, // Channels bot is currently in
     prompt_path: Arc<std::path::PathBuf>,          // Path to the prompt file
+    bn_interject: BlueNoiseInterjecter,
+    bn_interject_mention: BlueNoiseInterjecter,
 }
 
 pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
@@ -39,7 +41,9 @@ pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
         config: Arc::new(config),
         db_conn,
         current_channels: Arc::new(Mutex::new(HashSet::new())),
-        prompt_path: Arc::new(Config::load()?.prompt_path()), // Load prompt path here
+        prompt_path: Arc::new(Config::load()?.prompt_path()),
+        bn_interject: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE),
+        bn_interject_mention: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE_IF_MENTIONED),
     };
 
     let mut stream = client.stream()?;
@@ -128,7 +132,7 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
             let source_nick = message.source_nickname().unwrap_or("unknown");
             tracing::debug!(from = %source_nick, %target, %msg, "PRIVMSG received");
 
-            if target == client.current_nickname() || msg.starts_with("!") {
+            if target == client.current_nickname() {
                 // Private message or command
                 handle_admin_command(client, state, source_nick, msg).await?;
             } else if target.starts_with('#') {
@@ -143,10 +147,11 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
                 let is_addressed = msg_lower.starts_with(&format!("{}:", bot_nick_lower))
                     || msg_lower.starts_with(&format!("{},", bot_nick_lower))
                     || msg_lower.split_whitespace().next() == Some(&bot_nick_lower)
-                    || (msg.to_lowercase().contains(format!(" {}", bot_nick_lower).as_str()) && rand::rng().random_bool(RANDOM_INTERJECT_CHANCE_IF_MENTIONED));
+                    || (msg.to_lowercase().contains(format!(" {}", bot_nick_lower).as_str())
+                        && state.bn_interject_mention.should_interject());
 
                 let should_trigger_ai =
-                    is_addressed || rand::rng().random_bool(RANDOM_INTERJECT_CHANCE);
+                    is_addressed || state.bn_interject.should_interject();
 
                 if should_trigger_ai {
                     // Spawn AI task
@@ -201,8 +206,8 @@ async fn handle_ai_request(
         &triggering_nick,
         &triggering_message,
         history,
-        &state.prompt_path, // Pass prompt path
-                            // Pass API key/client if needed from state
+        &state.prompt_path,
+        was_addressed,
     )
     .await;
 

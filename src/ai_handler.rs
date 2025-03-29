@@ -28,24 +28,41 @@ pub async fn get_ai_response(
     triggering_nick: &str,
     triggering_message: &str,
     history: Vec<LogEntry>,
-    prompt_path: &std::path::Path, // Pass the path to read the prompt file
-                                   // Add any other context you need, like the API key or client instance
+    prompt_path: &std::path::Path,
+    was_addressed: bool,
 ) -> Result<String> {
     tracing::info!(channel, nick = triggering_nick, "AI response requested.");
 
-    // --- Placeholder Logic ---
     // 1. Read the system prompt (Emul's personality) from prompt_path
-    let system_prompt = read_prompt_file(prompt_path).await?; // You'll need this
+    let system_prompt = read_prompt_file(prompt_path).await?;
 
     // 2. Format the history
+    let history = if was_addressed {
+        history
+    } else {
+        let mut history = history.clone();
+        history.push(LogEntry {
+            channel: channel.to_string(),
+            nick: triggering_nick.to_string(),
+            message: triggering_message.to_string(),
+        });
+        history
+    };
     let formatted_history = format_history(&history);
 
     // 3. Construct the full prompt/context for Gemini
     //    Combine system_prompt, formatted_history, triggering_nick, triggering_message
-    let full_context = format!(
-        "History:\n{}\n\n Current Trigger from {}:\n{}",
-        formatted_history, triggering_nick, triggering_message
-    );
+    let full_context = if was_addressed {
+        format!(
+            "History:\n{}\n\n Current Trigger from {}:\n{}",
+            formatted_history, triggering_nick, triggering_message
+        )
+    } else {
+        format!(
+            "History:\n{}\n\n Current trigger: Random chance (interject your opinion in the current conversation)",
+            formatted_history
+        )
+    };
     tracing::debug!(context_size = full_context.len(), "Constructed AI context");
     tracing::trace!(context = %full_context, "Full AI context");
 

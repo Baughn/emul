@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 mod ai_handler;
+mod bluenoise;
 mod bot;
 mod config;
 mod db;
