@@ -2,6 +2,7 @@ use crate::db::LogEntry;
 use crate::nyaa_parser; // Import the nyaa parser
 use anyhow::{anyhow, bail, Context, Result};
 use rand::Rng; // Import rand for dice rolling
+use serde::{Deserialize, Serialize}; // Add Serialize/Deserialize for new structs
 use serde_json::{json, Value}; // Import Value for handling JSON
 use tokio::time::{timeout, Duration};
 
@@ -186,8 +187,10 @@ pub async fn call_chatbot(
     history: Vec<LogEntry>,
     prompt_path: &std::path::Path,
     was_addressed: bool,
-) -> Result<String> {
+) -> Result<ChatbotResponse> { // Changed return type
     tracing::info!(channel, nick = triggering_nick, "AI response requested.");
+
+    let mut invoked_tools: Vec<ToolInvocation> = Vec::new(); // Initialize tool tracking
 
     // 1. Read the system prompt
     let system_prompt = read_prompt_file(prompt_path).await?;
@@ -282,7 +285,11 @@ pub async fn call_chatbot(
 
             tracing::info!(response_size = response_text.len(), "Received final AI text response");
             tracing::info!(response = %response_text);
-            return Ok(response_text.to_string());
+            // Return final response along with any tools invoked in previous turns
+            return Ok(ChatbotResponse {
+                text_response: response_text.to_string(),
+                invoked_tools,
+            });
         } else {
             // 5b. Function call(s) detected
             tracing::info!(count = function_calls.len(), "Function call(s) detected, executing...");
@@ -300,9 +307,15 @@ pub async fn call_chatbot(
                 let name = func_call_json["name"]
                     .as_str()
                     .ok_or_else(|| anyhow!("Function call missing name"))?;
-                let args = func_call_json.get("args").cloned().unwrap_or(json!({}));
+                let args = func_call_json.get("args").cloned().unwrap_or(json!({})); // Keep args as Value
 
                 tracing::info!(function_name = %name, args = %args, "Executing function call");
+
+                // Record the invocation *before* executing
+                invoked_tools.push(ToolInvocation {
+                    name: name.to_string(),
+                    args: args.clone(), // Clone args for storage
+                });
 
                 // Execute the corresponding local function
                 let result_content = match name {
@@ -448,6 +461,7 @@ async fn fast_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json; // Import json macro for creating expected args
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
     use tokio::runtime::Runtime;
@@ -496,11 +510,22 @@ mod tests {
         println!("call_chatbot (dice) result: {:?}", result); // Print for debugging
 
         assert!(result.is_ok());
-        let response_text = result.unwrap().to_lowercase();
-        assert!(!response_text.is_empty());
-        // Check if the response contains typical dice roll output
-        assert!(response_text.contains("rolled 3d6+2") || response_text.contains("roll 3d6+2"));
-        assert!(response_text.contains("=")); // Should show the result
+        let response = result.unwrap();
+        assert!(!response.text_response.is_empty());
+
+        // Check that the correct tool was invoked with the correct arguments
+        assert_eq!(response.invoked_tools.len(), 1);
+        let tool_call = &response.invoked_tools[0];
+        assert_eq!(tool_call.name, "roll_dice");
+        assert_eq!(
+            tool_call.args,
+            json!({"dice_notation": "3d6+2"}) // Use json! macro for comparison
+        );
+
+        // Optionally, still check the text response for keywords
+        let response_text_lower = response.text_response.to_lowercase();
+        assert!(response_text_lower.contains("rolled 3d6+2") || response_text_lower.contains("roll 3d6+2"));
+        assert!(response_text_lower.contains("="));
     }
 
      #[tokio::test]
@@ -520,11 +545,21 @@ mod tests {
          println!("call_chatbot (torrent) result: {:?}", result); // Print for debugging
 
          assert!(result.is_ok());
-         let response_text = result.unwrap();
-         assert!(!response_text.is_empty());
-         // Check if the bot confirms starting the download
-         assert!(response_text.contains("Okay, I found the magnet link") || response_text.contains("start the download"));
-         assert!(response_text.contains(nyaa_url)); // Should mention the URL
+         let response = result.unwrap();
+         assert!(!response.text_response.is_empty());
+
+         // Check that the correct tool was invoked with the correct arguments
+         assert_eq!(response.invoked_tools.len(), 1);
+         let tool_call = &response.invoked_tools[0];
+         assert_eq!(tool_call.name, "download_torrent");
+         assert_eq!(
+             tool_call.args,
+             json!({"nyaa_url": nyaa_url}) // Use json! macro for comparison
+         );
+
+         // Optionally, still check the text response for keywords
+         assert!(response.text_response.contains("Okay, I found the magnet link") || response.text_response.contains("start the download"));
+         assert!(response.text_response.contains(nyaa_url));
      }
 
      #[tokio::test]
