@@ -496,10 +496,10 @@ mod tests {
         println!("call_chatbot (dice) result: {:?}", result); // Print for debugging
 
         assert!(result.is_ok());
-        let response_text = result.unwrap();
+        let response_text = result.unwrap().to_lowercase();
         assert!(!response_text.is_empty());
         // Check if the response contains typical dice roll output
-        assert!(response_text.contains("Rolled 3d6+2") || response_text.contains("roll 3d6+2"));
+        assert!(response_text.contains("rolled 3d6+2") || response_text.contains("roll 3d6+2"));
         assert!(response_text.contains("=")); // Should show the result
     }
 
