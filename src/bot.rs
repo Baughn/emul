@@ -265,10 +265,11 @@ async fn handle_ai_request(
     match ai_result {
         Ok(response) => {
             tracing::info!(%channel, "Sending AI response");
-            // Store the AI response in the database for later turns.
-            db::log_message(&*state.db_conn.lock().await, &channel, &state.config.nickname, &response)
+            // Store the AI response's text part in the database
+            db::log_message(&*state.db_conn.lock().await, &channel, &state.config.nickname, &response.text_response)
                 .unwrap_or_else(|e| tracing::error!("Failed to log AI response: {:?}", e));
-            let lines = split_response(430, &response);
+            // Split the text response for sending
+            let lines = split_response(430, &response.text_response);
             for line in lines {
                 if let Err(e) = sender.send_privmsg(&channel, line) {
                     tracing::error!(%channel, "Failed to send AI response chunk: {}", e);
