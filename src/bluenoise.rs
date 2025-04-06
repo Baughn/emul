@@ -21,6 +21,8 @@ struct BlueNoiseInterjecterInner {
     message_count: usize,
     // Last interjection message index
     last_interjection: usize,
+    // Set to force interjection
+    force_interject: bool,
 }
 
 // Our BlueNoiseInterjecter is now automatically Send + Sync because
@@ -39,6 +41,7 @@ impl BlueNoiseInterjecter {
             recent_interjections: VecDeque::with_capacity(10),
             message_count: 0,
             last_interjection: 0,
+            force_interject: false,
         };
         
         Self {
@@ -52,6 +55,11 @@ impl BlueNoiseInterjecter {
         
         inner.message_count += 1;
         let messages_since_last = inner.message_count - inner.last_interjection;
+
+        if inner.force_interject {
+            inner.force_interject = false;
+            return true;
+        }
         
         // Enforce minimum gap - never interject if too soon after last one
         if messages_since_last < inner.min_gap {
@@ -77,6 +85,12 @@ impl BlueNoiseInterjecter {
         } else {
             false
         }
+    }
+
+    pub fn bump_counter(&self) {
+        let mut inner = self.inner.lock().expect("Mutex was poisoned");
+
+        inner.force_interject = true;
     }
 }
 

@@ -85,7 +85,7 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
             let source = message.source_nickname().unwrap_or("unknown");
             tracing::info!(from = %source, %msg, "Received NOTICE");
             // Handle NickServ notices.
-            if source == "NickServ" && msg.contains("you are now recognized") {
+            if source == "NickServ" && (msg.contains("you are now recognized") || msg.contains("is not a registered nickname")) {
                 // *Now* we can join our channels.
                 tracing::info!("NickServ recognized us, joining channels");
                 let channels = db::get_channels(&*state.db_conn.lock().await)?;
@@ -399,6 +399,10 @@ async fn handle_admin_command(
                 tracing::error!("Failed to fetch channels: {:?}", e);
                 client.send_privmsg(nick, "Oops, couldn't check the channel list right now.")?;
             }
+        },
+        Some("!interject") => {
+            state.bn_interject.bump_counter();
+            client.send_privmsg(nick, "Bumped!")?;
         },
         Some("!help") => {
             client.send_privmsg(nick, "Admin commands: !join <#chan>, !part <#chan>, !add_admin <nick>, !del_admin <nick>, !admins, !channels, !help")?;
