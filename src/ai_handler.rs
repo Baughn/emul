@@ -30,6 +30,21 @@ async fn read_prompt_file(prompt_path: &std::path::Path) -> Result<String> {
     })
 }
 
+// --- Structs for Tool Invocation Tracking ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)] // Added derives
+pub struct ToolInvocation {
+    pub name: String,
+    pub args: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)] // Added derives
+pub struct ChatbotResponse {
+    pub text_response: String,
+    pub invoked_tools: Vec<ToolInvocation>,
+}
+
+
 // --- Tool Definitions ---
 
 fn get_tools_json() -> Value {
