@@ -638,10 +638,14 @@ async fn fast_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json; // Import json macro for creating expected args
+    use crate::bot::ImageCache; // Import the type alias
+    use lru::LruCache;
+    use serde_json::json;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
-    // Removed unused: use tokio::runtime::Runtime;
+    use tokio::sync::Mutex;
 
     // Helper to ensure API key is set (tests will panic if not)
     fn ensure_api_key() {
@@ -682,8 +686,12 @@ mod tests {
         let nick = "tester";
         let message = "Please roll 3d6+2 for me.";
         let history = Vec::new(); // Empty history for simplicity
+        // Create a dummy cache for the test
+        let image_cache: ImageCache = Arc::new(Mutex::new(LruCache::new(
+            NonZeroUsize::new(1).unwrap(), // Minimal cache size for test
+        )));
 
-        let result = call_chatbot(channel, nick, message, history, &prompt_path, true).await;
+        let result = call_chatbot(channel, nick, message, history, &prompt_path, true, &image_cache).await;
         println!("call_chatbot (dice) result: {:?}", result); // Print for debugging
 
         assert!(result.is_ok());
@@ -712,8 +720,12 @@ mod tests {
          let nyaa_url = "https://nyaa.si/view/1955613"; // Example URL from nyaa_parser tests
          let message = format!("Hey, can you download this for me? {}", nyaa_url);
          let history = Vec::new();
+         // Create a dummy cache for the test
+         let image_cache: ImageCache = Arc::new(Mutex::new(LruCache::new(
+             NonZeroUsize::new(1).unwrap(), // Minimal cache size for test
+         )));
 
-         let result = call_chatbot(channel, nick, &message, history, &prompt_path, true).await;
+         let result = call_chatbot(channel, nick, &message, history, &prompt_path, true, &image_cache).await;
          println!("call_chatbot (torrent) result: {:?}", result); // Print for debugging
 
          assert!(result.is_ok());
