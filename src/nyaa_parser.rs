@@ -1,8 +1,13 @@
+use reqwest::StatusCode;
 use scraper::{Html, Selector};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum NyaaParserError {
+    #[error("Network request failed: {0}")]
+    RequestError(#[from] reqwest::Error),
+    #[error("HTTP request returned non-success status: {0}")]
+    HttpStatusError(StatusCode),
     #[error("Could not find the magnet link anchor tag in the HTML content")]
     MagnetLinkNotFound,
     #[error("Failed to parse CSS selector: {0}")]
@@ -48,6 +53,32 @@ pub fn extract_magnet_url(html_content: &str) -> Result<String, NyaaParserError>
         Err(NyaaParserError::MagnetLinkNotFound)
     }
 }
+
+/// Fetches the HTML content from a Nyaa.si view page URL and extracts the primary magnet link.
+///
+/// # Arguments
+///
+/// * `url` - The URL of the Nyaa.si torrent page.
+///
+/// # Returns
+///
+/// A `Result` containing the magnet URL as a `String` if successful, or a `NyaaParserError` otherwise.
+pub async fn fetch_and_extract_magnet_url(url: &str) -> Result<String, NyaaParserError> {
+    // Perform the HTTP GET request
+    let response = reqwest::get(url).await?;
+
+    // Check if the request was successful
+    if !response.status().is_success() {
+        return Err(NyaaParserError::HttpStatusError(response.status()));
+    }
+
+    // Read the response body as text
+    let html_content = response.text().await?;
+
+    // Extract the magnet URL from the HTML content
+    extract_magnet_url(&html_content)
+}
+
 
 // --- Unit Tests ---
 #[cfg(test)]
@@ -145,4 +176,48 @@ mod tests {
         // If Selector::parse doesn't error on this specific string, the test still passes,
         // as we are focused on the error *type* conversion when an error *does* occur.
     }
+
+    // Note: This test requires network access and depends on an external site.
+    // Consider using a mocking library (like mockito) for more robust testing in CI/CD.
+    #[tokio::test]
+    #[ignore] // Ignore by default as it hits the network
+    async fn test_fetch_and_extract_live() {
+        // Use a known Nyaa page URL. Replace with a current one if this becomes invalid.
+        // This is the page corresponding to testdata/nyaa.html
+        let url = "https://nyaa.si/view/1955613";
+        let expected_magnet = "magnet:?xt=urn:btih:1695d42fae2d7655e544fa3a92f5d90fa0719106&dn=%5BSubsPlease%5D%20Danjo%20no%20Yuujou%20wa%20Seiritsu%20suru%20-%2001%20%281080p%29%20%5B605B7639%5D.mkv&tr=http%3A%2F%2Fnyaa.tracker.wf%3A7777%2Fannounce&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce&tr=udp%3A%2F%2Fexodus.desync.com%3A6969%2Fannounce&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce";
+
+        match fetch_and_extract_magnet_url(url).await {
+            Ok(magnet_url) => assert_eq!(magnet_url, expected_magnet),
+            Err(e) => panic!("fetch_and_extract_live failed: {}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_invalid_url() {
+        let url = "invalid-url"; // Definitely not a valid URL
+        match fetch_and_extract_magnet_url(url).await {
+            Err(NyaaParserError::RequestError(_)) => (), // Expected error
+            Ok(url) => panic!("Expected error, but got URL: {}", url),
+            Err(e) => panic!("Expected RequestError, but got different error: {}", e),
+        }
+    }
+
+    // Example test for HTTP status error (requires a web server or mocking)
+    // #[tokio::test]
+    // async fn test_fetch_http_error() {
+    //     // Setup a mock server that returns 404 for a specific path
+    //     let mut server = mockito::Server::new_async().await;
+    //     let mock = server.mock("GET", "/notfound")
+    //         .with_status(404)
+    //         .create_async().await;
+    //
+    //     let url = &format!("{}/notfound", server.url());
+    //     match fetch_and_extract_magnet_url(url).await {
+    //         Err(NyaaParserError::HttpStatusError(status)) => assert_eq!(status, StatusCode::NOT_FOUND),
+    //         Ok(url) => panic!("Expected error, but got URL: {}", url),
+    //         Err(e) => panic!("Expected HttpStatusError, but got different error: {}", e),
+    //     }
+    //     mock.assert_async().await; // Verify the mock was called
+    // }
 }
