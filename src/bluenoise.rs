@@ -210,12 +210,20 @@ mod tests {
         
         println!("Standard deviation: {:.2}", std_dev);
         
-        // Blue noise should have lower variance than white noise
-        // For white noise (poisson process), variance ≈ mean
-        // For blue noise, variance should be lower
-        assert!(std_dev < avg_gap, "Distribution doesn't have blue noise properties");
-        
-        // Check 7: Test for autocorrelation at small lags
+        // Blue noise should have lower variance than white noise (Poisson process),
+        // where variance ≈ mean.
+        assert!(std_dev < avg_gap, "Distribution doesn't have blue noise properties (variance too high)"); // Added detail to assertion message
+
+        // Check 7: Ensure variance is not *too* low (i.e., it's still random)
+        // A very low std dev would mean highly regular spacing.
+        // We expect *some* variability. Let's check if std_dev is at least, say, 1/5th of the average gap.
+        // This threshold might need tuning based on the desired "randomness feel".
+        let min_expected_std_dev = avg_gap / 5.0;
+        assert!(std_dev > min_expected_std_dev,
+                "Standard deviation {:.2} is too low (less than {:.2}), distribution is too regular",
+                std_dev, min_expected_std_dev);
+
+        // Check 8: Test for autocorrelation at small lags
         // Blue noise should have negative autocorrelation at small lags
         let mut autocorrelation = 0.0;
         for i in 0..gaps.len()-1 {
