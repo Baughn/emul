@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex; // Use tokio's Mutex for async code
+use tokio::time::{sleep, Duration}; // Import sleep and Duration
 
 // Shared state for the bot
 #[derive(Clone)]
@@ -21,24 +22,53 @@ struct BotState {
     bn_interject_mention: BlueNoiseInterjecter,
 }
 
-pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
-    tracing::info!(server = %config.server, port = %config.port, nick = %config.nickname, "Connecting to IRC");
+const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(300); // 5 minutes
 
-    let irc_config = irc::client::data::Config {
-        nickname: Some(config.nickname.clone()),
+pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
+    let mut reconnect_delay = INITIAL_RECONNECT_DELAY;
+
+    // --- Outer Reconnection Loop ---
+    loop {
+        tracing::info!(server = %config.server, port = %config.port, nick = %config.nickname, "Attempting to connect to IRC...");
+
+        let irc_config = irc::client::data::Config {
+            nickname: Some(config.nickname.clone()),
         nick_password: config.nickserv_password.clone(),
         server: Some(config.server.clone()),
         port: Some(config.port),
         use_tls: Some(config.use_tls),
         version: Some("EmulBotRs v0.1 - https://github.com/baughn/emulbot".to_string()), // Be polite!
-        ..irc::client::data::Config::default()
-    };
+            ..irc::client::data::Config::default()
+        };
 
-    let mut client = Client::from_config(irc_config).await?;
-    client.identify()?; // Connects and starts PING/PONG
+        // --- Connection Attempt ---
+        let client_result = Client::from_config(irc_config).await;
+        let mut client = match client_result {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to create IRC client config: {}", e);
+                sleep(reconnect_delay).await;
+                reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY); // Exponential backoff
+                continue; // Retry connection
+            }
+        };
 
-    let state = BotState {
-        config: Arc::new(config),
+        if let Err(e) = client.identify() {
+            tracing::error!("Failed to identify/connect to IRC server: {}", e);
+            sleep(reconnect_delay).await;
+            reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY); // Exponential backoff
+            continue; // Retry connection
+        }
+
+        tracing::info!("Successfully connected and identified.");
+        reconnect_delay = INITIAL_RECONNECT_DELAY; // Reset delay on successful connection
+
+        // --- State Initialization (needs config reference) ---
+        // Clone config for the state, original config is moved into state later
+        let config_clone_for_state = config.clone();
+        let state = BotState {
+            config: Arc::new(config_clone_for_state), // Use the cloned config here
         db_conn,
         current_channels: Arc::new(Mutex::new(HashSet::new())),
         prompt_path: Arc::new(Config::load()?.prompt_path()),
@@ -46,34 +76,54 @@ pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
         bn_interject_mention: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE_IF_MENTIONED),
     };
 
-    let mut stream = client.stream()?;
-    let client = Arc::new(client);
-
-    // --- Main Event Loop ---
-    while let Some(message_result) = stream.next().await {
-        match message_result {
-            Ok(message) => {
-                // Spawn a task to handle the message concurrently
-                let state_clone = state.clone();
-                let client_clone = client.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_message(client_clone, state_clone, message).await {
-                        tracing::error!("Error handling message: {:?}", e);
-                    }
-                });
-            }
+        // --- Stream and Client Arc ---
+        let stream_result = client.stream();
+        let mut stream = match stream_result {
+            Ok(s) => s,
             Err(e) => {
-                tracing::error!("Connection error: {}", e);
-                // Implement reconnection logic here if desired
-                tokio::time::sleep(Duration::from_secs(15)).await;
-                tracing::info!("Attempting to reconnect...");
-                // This basic example exits, real bot needs reconnect loop
-                return Err(anyhow!("Connection lost: {}", e));
+                tracing::error!("Failed to get IRC stream: {}", e);
+                sleep(reconnect_delay).await;
+                reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY);
+                continue; // Retry connection
             }
-        }
-    }
+        };
+        let client_arc = Arc::new(client); // Keep original client ownership here for now
 
-    Ok(())
+        // --- Main Event Loop ---
+        loop { // Inner loop for message processing
+            match stream.next().await {
+                Some(Ok(message)) => {
+                // Spawn a task to handle the message concurrently
+                    let state_clone = state.clone();
+                    let client_clone = client_arc.clone(); // Clone the Arc
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_message(client_clone, state_clone, message).await {
+                            tracing::error!("Error handling message: {:?}", e);
+                        }
+                    });
+                }
+                Some(Err(e)) => {
+                    tracing::error!("Connection error: {}", e);
+                    // Break inner loop to trigger reconnection
+                    break;
+                }
+                None => {
+                    tracing::warn!("IRC stream ended unexpectedly.");
+                    // Break inner loop to trigger reconnection
+                    break;
+                }
+            }
+        } // End of inner message processing loop
+
+        // --- Reconnection Delay ---
+        tracing::info!("Disconnected. Waiting {:?} before reconnecting...", reconnect_delay);
+        sleep(reconnect_delay).await;
+        reconnect_delay = (reconnect_delay * 2).min(MAX_RECONNECT_DELAY); // Exponential backoff
+
+    } // End of outer reconnection loop
+    // Note: This loop runs indefinitely, so Ok(()) is never reached unless
+    // the program is explicitly terminated elsewhere.
+    // If a condition to exit gracefully is needed, it should be added.
 }
 
 async fn handle_message(client: Arc<Client>, state: BotState, message: Message) -> Result<()> {
