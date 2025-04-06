@@ -452,8 +452,9 @@ async fn handle_admin_command(
             }
         },
         Some("!interject") => {
-            state.bn_interject.bump_counter();
-            client.send_privmsg(nick, "Bumped!")?;
+            // Use the correct function name after rename
+            state.bn_interject.force_next_interjection();
+            client.send_privmsg(nick, "Okay, I'll try to interject soon!")?; // Adjusted message slightly
         },
         Some("!help") => {
             client.send_privmsg(nick, "Admin commands: !join <#chan>, !part <#chan>, !add_admin <nick>, !del_admin <nick>, !admins, !channels, !help")?;
