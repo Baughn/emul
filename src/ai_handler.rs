@@ -442,3 +442,116 @@ async fn fast_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
 
     Ok(response_text.to_string())
 }
+
+
+// --- Tests ---
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use tempfile::NamedTempFile;
+    use tokio::runtime::Runtime;
+
+    // Helper to ensure API key is set (tests will panic if not)
+    fn ensure_api_key() {
+        dotenvy::dotenv().ok(); // Load .env if present
+        std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY must be set for integration tests");
+    }
+
+    // Helper to create a dummy prompt file
+    async fn create_dummy_prompt_file() -> Result<(NamedTempFile, PathBuf)> {
+        let temp_file = NamedTempFile::new()?;
+        let path = temp_file.path().to_path_buf();
+        tokio::fs::write(&path, "You are a helpful test assistant.").await?;
+        Ok((temp_file, path))
+    }
+
+    #[tokio::test]
+    #[ignore] // Ignored by default as it calls the real API
+    async fn test_fast_gemini_live() {
+        ensure_api_key();
+        let system_prompt = "You are a test bot.";
+        let prompt = "Briefly explain what a large language model is.";
+
+        let result = fast_gemini(system_prompt, prompt).await;
+        println!("fast_gemini result: {:?}", result); // Print for debugging
+
+        assert!(result.is_ok());
+        let response_text = result.unwrap();
+        assert!(!response_text.is_empty());
+        assert!(response_text.to_lowercase().contains("language model"));
+    }
+
+    #[tokio::test]
+    #[ignore] // Ignored by default as it calls the real API
+    async fn test_call_chatbot_roll_dice_live() {
+        ensure_api_key();
+        let (_temp_file, prompt_path) = create_dummy_prompt_file().await.unwrap();
+        let channel = "#test";
+        let nick = "tester";
+        let message = "Please roll 3d6+2 for me.";
+        let history = Vec::new(); // Empty history for simplicity
+
+        let result = call_chatbot(channel, nick, message, history, &prompt_path, true).await;
+        println!("call_chatbot (dice) result: {:?}", result); // Print for debugging
+
+        assert!(result.is_ok());
+        let response_text = result.unwrap();
+        assert!(!response_text.is_empty());
+        // Check if the response contains typical dice roll output
+        assert!(response_text.contains("Rolled 3d6+2") || response_text.contains("roll 3d6+2"));
+        assert!(response_text.contains("=")); // Should show the result
+    }
+
+     #[tokio::test]
+     #[ignore] // Ignored by default as it calls the real API and external sites
+     async fn test_call_chatbot_download_torrent_live() {
+         ensure_api_key();
+         let (_temp_file, prompt_path) = create_dummy_prompt_file().await.unwrap();
+         let channel = "#test";
+         let nick = "tester";
+         // Use a known valid (or recently valid) Nyaa URL for testing
+         // NOTE: This URL might become invalid over time. Replace if needed.
+         let nyaa_url = "https://nyaa.si/view/1955613"; // Example URL from nyaa_parser tests
+         let message = format!("Hey, can you download this for me? {}", nyaa_url);
+         let history = Vec::new();
+
+         let result = call_chatbot(channel, nick, &message, history, &prompt_path, true).await;
+         println!("call_chatbot (torrent) result: {:?}", result); // Print for debugging
+
+         assert!(result.is_ok());
+         let response_text = result.unwrap();
+         assert!(!response_text.is_empty());
+         // Check if the bot confirms starting the download
+         assert!(response_text.contains("Okay, I found the magnet link") || response_text.contains("start the download"));
+         assert!(response_text.contains(nyaa_url)); // Should mention the URL
+     }
+
+     #[tokio::test]
+     #[ignore] // Ignored by default as it calls the real API
+     async fn test_chatbot_mentioned_live_respond() {
+         ensure_api_key();
+         let bot_name = "TestBot";
+         let message = "Hey TestBot, what do you think?";
+
+         let result = chatbot_mentioned(bot_name, message).await;
+         println!("chatbot_mentioned (respond) result: {:?}", result);
+
+         assert!(result.is_ok());
+         assert!(result.unwrap()); // Should be true (respond)
+     }
+
+     #[tokio::test]
+     #[ignore] // Ignored by default as it calls the real API
+     async fn test_chatbot_mentioned_live_mention() {
+         ensure_api_key();
+         let bot_name = "TestBot";
+         let message = "I saw TestBot in the channel earlier.";
+
+         let result = chatbot_mentioned(bot_name, message).await;
+         println!("chatbot_mentioned (mention) result: {:?}", result);
+
+         assert!(result.is_ok());
+         assert!(!result.unwrap()); // Should be false (mention)
+     }
+}
