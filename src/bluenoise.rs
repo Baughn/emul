@@ -118,7 +118,7 @@ mod tests {
         let bot = BlueNoiseInterjecter::new(0.1);
         
         // Run a large number of iterations
-        const NUM_ITERATIONS: usize = 100000; // Increased from 10000
+        const NUM_ITERATIONS: usize = 1_000_000;
         let mut interjections = Vec::new();
         
         for i in 0..NUM_ITERATIONS {
