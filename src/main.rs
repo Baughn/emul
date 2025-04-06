@@ -6,6 +6,7 @@ mod bluenoise;
 mod bot;
 mod config;
 mod db;
+mod nyaa_parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
