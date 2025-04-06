@@ -2,14 +2,14 @@ use crate::ai_handler;
 use crate::bluenoise::BlueNoiseInterjecter;
 use crate::config::{Config, RANDOM_INTERJECT_CHANCE, RANDOM_INTERJECT_CHANCE_IF_MENTIONED};
 use crate::db::{self, DbConnection}; // Import LogEntry type
-use anyhow::Result; // Removed unused 'anyhow' macro import
+use anyhow::Result;
 use futures::prelude::*;
 use irc::client::prelude::*; // Includes Client, Message, Command etc.
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex; // Use tokio's Mutex for async code
-use tokio::time::sleep; // Import only sleep, Duration comes from std::time
+use tokio::time::sleep;
 
 // Shared state for the bot
 #[derive(Clone)]
