@@ -69,12 +69,12 @@ pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
         let config_clone_for_state = config.clone();
         let state = BotState {
             config: Arc::new(config_clone_for_state), // Use the cloned config here
-        db_conn,
-        current_channels: Arc::new(Mutex::new(HashSet::new())),
-        prompt_path: Arc::new(Config::load()?.prompt_path()),
-        bn_interject: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE),
-        bn_interject_mention: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE_IF_MENTIONED),
-    };
+            db_conn: db_conn.clone(), // Clone the Arc<Mutex<Connection>>
+            current_channels: Arc::new(Mutex::new(HashSet::new())), // Reset channels on reconnect
+            prompt_path: Arc::new(config.prompt_path()), // Use config directly
+            bn_interject: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE),
+            bn_interject_mention: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE_IF_MENTIONED),
+        };
 
         // --- Stream and Client Arc ---
         let stream_result = client.stream();
