@@ -1,15 +1,21 @@
 use crate::ai_handler;
 use crate::bluenoise::BlueNoiseInterjecter;
 use crate::config::{Config, RANDOM_INTERJECT_CHANCE, RANDOM_INTERJECT_CHANCE_IF_MENTIONED};
-use crate::db::{self, DbConnection}; // Import LogEntry type
+use crate::db::{self, DbConnection};
 use anyhow::Result;
 use futures::prelude::*;
-use irc::client::prelude::*; // Includes Client, Message, Command etc.
+use irc::client::prelude::*;
+use lru::LruCache;
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex; // Use tokio's Mutex for async code
+use tokio::sync::Mutex;
 use tokio::time::sleep;
+
+// Type alias for the image cache: URL -> (MimeType, Base64Data)
+type ImageCache = Arc<Mutex<LruCache<String, (String, String)>>>;
+const IMAGE_CACHE_SIZE: usize = 20; // Store info for the last 20 image URLs
 
 // Shared state for the bot
 #[derive(Clone)]
@@ -17,9 +23,10 @@ struct BotState {
     config: Arc<Config>,
     db_conn: DbConnection,
     current_channels: Arc<Mutex<HashSet<String>>>, // Channels bot is currently in
-    prompt_path: Arc<std::path::PathBuf>,          // Path to the prompt file
+    prompt_path: Arc<std::path::PathBuf>, // Path to the prompt file
     bn_interject: BlueNoiseInterjecter,
     bn_interject_mention: BlueNoiseInterjecter,
+    image_cache: ImageCache, // Add the image cache
 }
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -71,9 +78,12 @@ pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
             config: Arc::new(config_clone_for_state), // Use the cloned config here
             db_conn: db_conn.clone(), // Clone the Arc<Mutex<Connection>>
             current_channels: Arc::new(Mutex::new(HashSet::new())), // Reset channels on reconnect
-            prompt_path: Arc::new(config.prompt_path()), // Use config directly
+            prompt_path: Arc::new(config.prompt_path()),
             bn_interject: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE),
             bn_interject_mention: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE_IF_MENTIONED),
+            image_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(IMAGE_CACHE_SIZE).unwrap(),
+            ))), // Initialize the cache
         };
 
         // --- Stream and Client Arc ---

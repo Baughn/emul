@@ -1,13 +1,21 @@
+use crate::bot::ImageCache; // Import the cache type
 use crate::db::LogEntry;
-use crate::nyaa_parser; // Import the nyaa parser
+use crate::nyaa_parser;
 use anyhow::{anyhow, bail, Context, Result};
-use rand::Rng; // Import rand for dice rolling
-use serde::{Deserialize, Serialize}; // Add Serialize/Deserialize for new structs
-use serde_json::{json, Value}; // Import Value for handling JSON
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _}; // Base64 encoding
+use lru::LruCache;
+use rand::Rng;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
+
 
 const MAX_FUNCTION_CALL_TURNS: usize = 2; // Max rounds of function calls before forcing text
 const API_TIMEOUT: Duration = Duration::from_secs(60); // Timeout for each API call
+const MAX_IMAGE_SIZE_BYTES: usize = 4 * 1024 * 1024; // Limit image download size (e.g., 4MB) to avoid excessive memory/token use
 
 /// Formats chat history for the AI prompt.
 /// Consider adding timestamps or adjusting formatting as needed for your AI.
@@ -78,6 +86,20 @@ fn get_tools_json() -> Value {
                         },
                         "required": ["nyaa_url"]
                     }
+                },
+                {
+                    "name": "fetch_and_prepare_image",
+                    "description": "Downloads an image from a URL, encodes it, and prepares it for the AI to process. Checks a cache first.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "The full URL of the image file (e.g., ending in .jpg, .png, .webp)."
+                            }
+                        },
+                        "required": ["url"]
+                    }
                 }
             ]
         }
@@ -143,6 +165,94 @@ fn roll_dice(dice_notation: &str) -> Result<String> {
 }
 
 
+/// Fetches image data from a URL, using an in-memory cache.
+/// Returns (mime_type, base64_data)
+async fn fetch_and_prepare_image(
+    url: &str,
+    cache: &ImageCache,
+) -> Result<(String, String)> {
+    // 1. Check cache first
+    {
+        let mut cache_locked = cache.lock().await;
+        if let Some((mime_type, data)) = cache_locked.get(url) {
+            tracing::info!(%url, "Image cache hit");
+            return Ok((mime_type.clone(), data.clone()));
+        }
+    } // Release lock
+
+    tracing::info!(%url, "Image cache miss, fetching image");
+
+    // 2. Fetch image data if not cached
+    let client = reqwest::Client::new();
+    let response = client.get(url)
+        .timeout(Duration::from_secs(15)) // Add timeout for image download
+        .send()
+        .await
+        .context("Failed to send request for image URL")?
+        .error_for_status()
+        .context("Image URL returned error status")?;
+
+    // 3. Check Content-Type and Size
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|val| val.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_lowercase()) // Get primary mime type
+        .unwrap_or_default();
+
+    let allowed_mime_types = ["image/jpeg", "image/png", "image/webp", "image/gif"]; // Add gif? Gemini supports it sometimes.
+    if !allowed_mime_types.contains(&content_type.as_str()) {
+        bail!(
+            "Unsupported image Content-Type: {}. Supported types are: {:?}",
+            content_type, allowed_mime_types
+        );
+    }
+
+    let content_length = response
+        .headers()
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|val| val.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    if content_length > MAX_IMAGE_SIZE_BYTES {
+        bail!(
+            "Image size ({:.2} MB) exceeds the limit of {:.2} MB",
+            content_length as f64 / (1024.0 * 1024.0),
+            MAX_IMAGE_SIZE_BYTES as f64 / (1024.0 * 1024.0)
+        );
+    }
+
+
+    // 4. Read image bytes (with size limit check again if length wasn't available)
+    let image_bytes = response
+        .bytes()
+        .await
+        .context("Failed to read image bytes")?;
+
+    if image_bytes.len() > MAX_IMAGE_SIZE_BYTES {
+         bail!(
+            "Image size ({:.2} MB) exceeds the limit of {:.2} MB (checked after download)",
+            image_bytes.len() as f64 / (1024.0 * 1024.0),
+            MAX_IMAGE_SIZE_BYTES as f64 / (1024.0 * 1024.0)
+        );
+    }
+
+
+    // 5. Encode as Base64
+    let base64_data = BASE64_STANDARD.encode(&image_bytes);
+
+    // 6. Store in cache
+    {
+        let mut cache_locked = cache.lock().await;
+        cache_locked.put(url.to_string(), (content_type.clone(), base64_data.clone()));
+        tracing::info!(%url, mime_type=%content_type, "Image stored in cache");
+    } // Release lock
+
+    Ok((content_type, base64_data))
+}
+
+
 /// Placeholder for initiating a torrent download.
 /// In a real implementation, this would likely send a message to a download manager/client.
 /// For now, it extracts the magnet link and confirms initiation.
@@ -202,10 +312,11 @@ pub async fn call_chatbot(
     history: Vec<LogEntry>,
     prompt_path: &std::path::Path,
     was_addressed: bool,
-) -> Result<ChatbotResponse> { // Changed return type
+    image_cache: &ImageCache, // Add cache parameter
+) -> Result<ChatbotResponse> {
     tracing::info!(channel, nick = triggering_nick, "AI response requested.");
 
-    let mut invoked_tools: Vec<ToolInvocation> = Vec::new(); // Initialize tool tracking
+    let mut invoked_tools: Vec<ToolInvocation> = Vec::new();
 
     // 1. Read the system prompt
     let system_prompt = read_prompt_file(prompt_path).await?;
@@ -317,7 +428,12 @@ pub async fn call_chatbot(
                 ));
             }
 
-            let mut function_responses = Vec::new();
+            // Add the model's function call turn to history FIRST
+            conversation_history.push(json!({"role": "model", "parts": model_response_parts.clone()}));
+
+            let mut function_responses_for_api = Vec::new(); // To build the final functionResponse part
+            let mut image_data_to_inject: Option<(String, String)> = None; // Option<(mime_type, base64_data)>
+
             for func_call_json in function_calls {
                 let name = func_call_json["name"]
                     .as_str()
@@ -333,45 +449,91 @@ pub async fn call_chatbot(
                 });
 
                 // Execute the corresponding local function
-                let result_content = match name {
+                let result_content_for_api; // This will hold the JSON for the functionResponse part
+
+                match name {
+                     "fetch_and_prepare_image" => {
+                        let url = args["url"].as_str().ok_or_else(|| {
+                            anyhow!("Missing 'url' argument for fetch_and_prepare_image")
+                        })?;
+                        match fetch_and_prepare_image(url, image_cache).await { // Pass cache
+                            Ok((mime_type, base64_data)) => {
+                                // Store image data to inject later
+                                image_data_to_inject = Some((mime_type, base64_data));
+                                // Prepare the standard success response for the API
+                                result_content_for_api = json!({
+                                    "result": "Image fetched successfully. Please refer to the provided image data."
+                                });
+                                tracing::info!("Image fetched and prepared for injection.");
+                            }
+                            Err(e) => {
+                                // Handle download error - prepare standard error response
+                                result_content_for_api = json!({ "error": e.to_string() });
+                                tracing::warn!("Image fetch failed: {}", e);
+                            }
+                        }
+                    }
                     "roll_dice" => {
                         let notation = args["dice_notation"].as_str().ok_or_else(|| {
                             anyhow!("Missing 'dice_notation' argument for roll_dice")
                         })?;
-                        match roll_dice(notation) {
+                        result_content_for_api = match roll_dice(notation) {
                             Ok(result) => json!({ "result": result }),
                             Err(e) => json!({ "error": e.to_string() }),
-                        }
+                        };
                     }
                     "download_torrent" => {
                         let url = args["nyaa_url"].as_str().ok_or_else(|| {
                             anyhow!("Missing 'nyaa_url' argument for download_torrent")
                         })?;
-                        match download_torrent(url).await {
+                         result_content_for_api = match download_torrent(url).await {
                             Ok(result) => json!({ "result": result }),
                             Err(e) => json!({ "error": e.to_string() }),
-                        }
+                        };
                     }
                     _ => {
                         tracing::warn!(function_name = %name, "Unknown function called");
-                        json!({ "error": format!("Unknown function: {}", name) })
+                        result_content_for_api = json!({ "error": format!("Unknown function: {}", name) });
                     }
-                };
+                }
 
-                // Prepare the response part for this function call
-                function_responses.push(json!({
+                 // Add the result for this specific function call to the list for the API response turn
+                 function_responses_for_api.push(json!({
                     "functionResponse": {
                         "name": name,
-                        "response": result_content
+                        "response": result_content_for_api // Use the prepared result/error
                     }
                 }));
+
+            } // End loop over function calls in this turn
+
+
+            // --- Inject Image Data if Present ---
+            if let Some((mime_type, base64_data)) = image_data_to_inject {
+                conversation_history.push(json!({
+                    "role": "user",
+                    "parts": [{
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": base64_data
+                        }
+                    }]
+                }));
+                tracing::info!("Injected image data message into history.");
             }
 
-            // Add all function results as a single "user" turn to the history
-            conversation_history.push(json!({"role": "user", "parts": function_responses}));
-            // Continue to the next iteration of the loop
+            // --- Add the Function Response Turn ---
+            // This turn contains the results/errors for ALL function calls made in the previous model turn
+            conversation_history.push(json!({
+                "role": "user",
+                "parts": function_responses_for_api // Contains results/errors for all executed functions
+            }));
+            tracing::info!("Added function response message to history.");
+
+            // Continue the loop - the history is now augmented
+            continue; // Skip to next iteration
         }
-    } // End of loop
+    } // End of function calling loop
 
     // If loop finishes without returning a text response (e.g., only function calls within limit)
     tracing::error!("AI interaction finished without a final text response after {} turns.", MAX_FUNCTION_CALL_TURNS + 1);
