@@ -3,6 +3,10 @@ use crate::nyaa_parser; // Import the nyaa parser
 use anyhow::{anyhow, bail, Context, Result};
 use rand::Rng; // Import rand for dice rolling
 use serde_json::{json, Value}; // Import Value for handling JSON
+use tokio::time::{timeout, Duration};
+
+const MAX_FUNCTION_CALL_TURNS: usize = 2; // Max rounds of function calls before forcing text
+const API_TIMEOUT: Duration = Duration::from_secs(60); // Timeout for each API call
 
 /// Formats chat history for the AI prompt.
 /// Consider adding timestamps or adjusting formatting as needed for your AI.
@@ -215,135 +219,137 @@ pub async fn call_chatbot(
     tracing::debug!(context_size = prompt_text.len(), "Constructed initial AI context");
     tracing::trace!(context_lines = %prompt_text.lines().count(), "Context size");
 
-    // Define tools for this call
-    let tools = get_tools_json();
-
     // --- Multi-Turn Function Calling Loop ---
-    // We might need multiple turns if the model calls functions.
-    // For simplicity, this implementation handles one round of function calls.
-    // A more robust version might loop until a text response is received.
+    let mut conversation_history: Vec<Value> =
+        vec![json!({"role": "user", "parts": [{"text": prompt_text}]})];
+    let available_tools = get_tools_json(); // Define tools once
 
-    // 3. First API Call (with tools)
-    let initial_response = smart_gemini(&system_prompt, &prompt_text, Some(&tools)).await?;
+    for turn in 0..=MAX_FUNCTION_CALL_TURNS {
+        let use_tools = turn < MAX_FUNCTION_CALL_TURNS; // Only use tools for the allowed number of turns
+        let tools_param = if use_tools { Some(&available_tools) } else { None };
 
-    // 4. Check for Function Call(s) in the response
-    let function_calls = initial_response
-        .get("candidates")
-        .and_then(|c| c.get(0))
-        .and_then(|c0| c0.get("content"))
-        .and_then(|con| con.get("parts"))
-        .and_then(|p| p.as_array())
-        .map(|parts| {
-            parts
-                .iter()
-                .filter_map(|part| part.get("functionCall"))
-                .collect::<Vec<&Value>>()
-        })
-        .unwrap_or_default();
+        tracing::info!(turn = turn + 1, use_tools, "Starting AI turn");
 
-    if function_calls.is_empty() {
-        // 5a. No function call - Extract direct text response
-        let response_text = initial_response
-            .get("candidates")
-            .and_then(|c| c.get(0))
-            .and_then(|c0| c0.get("content"))
-            .and_then(|con| con.get("parts"))
-            .and_then(|p| p.get(0))
-            .and_then(|p0| p0.get("text"))
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow!("Gemini response missing text part"))?;
-
-        tracing::info!(response_size = response_text.len(), "Received direct AI response");
-        tracing::info!(response = %response_text);
-        Ok(response_text.to_string())
-    } else {
-        // 5b. Function call(s) detected - Execute functions and respond
-        tracing::info!(count = function_calls.len(), "Function call(s) detected");
-
-        let mut function_responses = Vec::new();
-
-        // Store the model's request containing the function calls
-        let model_request_part = initial_response["candidates"][0]["content"]["parts"].clone();
-
-        for func_call_json in function_calls {
-            let name = func_call_json["name"]
-                .as_str()
-                .ok_or_else(|| anyhow!("Function call missing name"))?;
-            let args = func_call_json
-                .get("args")
-                .cloned()
-                .unwrap_or(json!({})); // Default to empty object if args are missing
-
-            tracing::info!(function_name = %name, args = %args, "Executing function call");
-
-            // Execute the corresponding local function
-            let result_content = match name {
-                "roll_dice" => {
-                    let notation = args["dice_notation"]
-                        .as_str()
-                        .ok_or_else(|| anyhow!("Missing 'dice_notation' argument for roll_dice"))?;
-                    match roll_dice(notation) {
-                        Ok(result) => json!({ "result": result }),
-                        Err(e) => json!({ "error": e.to_string() }),
-                    }
-                }
-                "download_torrent" => {
-                    let url = args["nyaa_url"]
-                        .as_str()
-                        .ok_or_else(|| anyhow!("Missing 'nyaa_url' argument for download_torrent"))?;
-                    match download_torrent(url).await {
-                        Ok(result) => json!({ "result": result }),
-                        Err(e) => json!({ "error": e.to_string() }),
-                    }
-                }
-                _ => {
-                    tracing::warn!(function_name = %name, "Unknown function called");
-                    json!({ "error": format!("Unknown function: {}", name) })
-                }
-            };
-
-            // Add the result to the list of responses to send back
-            function_responses.push(json!({
-                "functionResponse": {
-                    "name": name,
-                    "response": result_content // Send back the JSON result/error
-                }
-            }));
-        }
-
-        // 6. Construct the second API call context
-        //    Need to include: original user prompt, model's function call request, our function responses
-        let mut history_for_final_call = vec![
-            json!({"role": "user", "parts": [{"text": prompt_text}]}), // Original user prompt context
-            json!({"role": "model", "parts": model_request_part}), // Model's request with function calls
-            json!({"role": "user", "parts": function_responses}), // Our function execution results
-        ];
-
-        // 7. Second API Call (sending function results)
-        //    No tools needed here, we expect a text response.
-        let final_response_json = call_gemini_with_history(
-            &system_prompt,
-            &mut history_for_final_call, // Pass the constructed history
-            "gemini-2.5-pro-exp-03-25", // Use the appropriate model
-            None, // No tools needed for the final response generation
+        // 3. Call Gemini API
+        let response_json = match timeout(
+            API_TIMEOUT,
+            call_gemini_with_history(
+                &system_prompt,
+                &mut conversation_history, // Pass mutable ref to potentially update history inside
+                "gemini-2.5-pro-exp-03-25",
+                tools_param,
+            ),
         )
-        .await?;
+        .await
+        {
+            Ok(Ok(res)) => res,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "Gemini API call failed within timeout");
+                // Append an error message to history? Or just bail?
+                // For now, bail.
+                return Err(e.context("Gemini API call failed"));
+            }
+            Err(_) => {
+                tracing::error!("Gemini API call timed out after {:?}", API_TIMEOUT);
+                return Err(anyhow!("Gemini API call timed out"));
+            }
+        };
 
-        // 8. Extract final text response
-        let final_text = final_response_json
-            .get("candidates")
-            .and_then(|c| c.get(0))
-            .and_then(|c0| c0.get("content"))
-            .and_then(|con| con.get("parts"))
-            .and_then(|p| p.get(0))
-            .and_then(|p0| p0.get("text"))
-            .and_then(|t| t.as_str())
-            .ok_or_else(|| anyhow!("Gemini final response missing text part after function call"))?;
+        // --- Process Response ---
 
-        tracing::info!(response_size = final_text.len(), "Received final AI response after function call");
-        tracing::info!(response = %final_text);
-        Ok(final_text.to_string())
-    }
+        // Extract the model's response part(s) to add to history
+        let model_response_parts = response_json["candidates"][0]["content"]["parts"].clone();
+        conversation_history.push(json!({"role": "model", "parts": model_response_parts.clone()})); // Add model's turn to history
+
+        // Check for Function Call(s)
+        let function_calls: Vec<&Value> = model_response_parts
+            .as_array()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part.get("functionCall"))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if function_calls.is_empty() {
+            // 5a. No function call - Extract direct text response
+            let response_text = model_response_parts
+                .get(0)
+                .and_then(|p0| p0.get("text"))
+                .and_then(|t| t.as_str())
+                .ok_or_else(|| anyhow!("Gemini response missing text part"))?;
+
+            tracing::info!(response_size = response_text.len(), "Received final AI text response");
+            tracing::info!(response = %response_text);
+            return Ok(response_text.to_string());
+        } else {
+            // 5b. Function call(s) detected
+            tracing::info!(count = function_calls.len(), "Function call(s) detected, executing...");
+
+            if !use_tools {
+                // Should not happen if MAX_FUNCTION_CALL_TURNS is respected, but safety check
+                tracing::error!("Function call detected but tools were disabled (turn limit exceeded).");
+                return Err(anyhow!(
+                    "Function call loop exceeded limit but model still requested calls"
+                ));
+            }
+
+            let mut function_responses = Vec::new();
+            for func_call_json in function_calls {
+                let name = func_call_json["name"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("Function call missing name"))?;
+                let args = func_call_json.get("args").cloned().unwrap_or(json!({}));
+
+                tracing::info!(function_name = %name, args = %args, "Executing function call");
+
+                // Execute the corresponding local function
+                let result_content = match name {
+                    "roll_dice" => {
+                        let notation = args["dice_notation"].as_str().ok_or_else(|| {
+                            anyhow!("Missing 'dice_notation' argument for roll_dice")
+                        })?;
+                        match roll_dice(notation) {
+                            Ok(result) => json!({ "result": result }),
+                            Err(e) => json!({ "error": e.to_string() }),
+                        }
+                    }
+                    "download_torrent" => {
+                        let url = args["nyaa_url"].as_str().ok_or_else(|| {
+                            anyhow!("Missing 'nyaa_url' argument for download_torrent")
+                        })?;
+                        match download_torrent(url).await {
+                            Ok(result) => json!({ "result": result }),
+                            Err(e) => json!({ "error": e.to_string() }),
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(function_name = %name, "Unknown function called");
+                        json!({ "error": format!("Unknown function: {}", name) })
+                    }
+                };
+
+                // Prepare the response part for this function call
+                function_responses.push(json!({
+                    "functionResponse": {
+                        "name": name,
+                        "response": result_content
+                    }
+                }));
+            }
+
+            // Add all function results as a single "user" turn to the history
+            conversation_history.push(json!({"role": "user", "parts": function_responses}));
+            // Continue to the next iteration of the loop
+        }
+    } // End of loop
+
+    // If loop finishes without returning a text response (e.g., only function calls within limit)
+    tracing::error!("AI interaction finished without a final text response after {} turns.", MAX_FUNCTION_CALL_TURNS + 1);
+    Err(anyhow!(
+        "AI failed to provide a text response after function call iterations"
+    ))
 }
 
 
@@ -415,20 +421,10 @@ async fn call_gemini_with_history(
 
 // --- Specific Model Wrappers ---
 
-/// Calls the 'smart' Gemini model, potentially using tools.
-async fn smart_gemini(
-    system_prompt: &str,
-    prompt: &str,
-    tools: Option<&Value>,
-) -> Result<Value> {
-    // For a single prompt, create a simple history
-    let mut history = vec![json!({"role": "user", "parts": [{"text": prompt}]})];
-    call_gemini_with_history(system_prompt, &mut history, "gemini-2.5-pro-exp-03-25", tools).await
-}
-
-/// Calls the 'fast' Gemini model, primarily for simple text generation (no tools used by default).
+/// Calls the 'fast' Gemini model, primarily for simple text generation (no tools used).
 /// Returns the extracted text directly for convenience in simple cases like chatbot_mentioned.
 async fn fast_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
+    // For a single prompt, create a simple history
     let mut history = vec![json!({"role": "user", "parts": [{"text": prompt}]})];
     // Call without tools
     let response_json = call_gemini_with_history(system_prompt, &mut history, "gemini-2.5-pro-exp-03-25", None).await?;
