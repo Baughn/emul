@@ -139,7 +139,7 @@ mod tests {
         // The primary goal is testing the error mapping, not whether scraper::Selector::parse
         // catches *every* conceivable invalid string. If it *does* error, we check the mapping.
         if let Err(e) = result {
-             let mapped_error = Err(e).map_err(|err| NyaaParserError::SelectorParseError(err.to_string()));
+             let mapped_error: Result<String, NyaaParserError> = Err(e).map_err(|err| NyaaParserError::SelectorParseError(err.to_string()));
              assert!(matches!(mapped_error, Err(NyaaParserError::SelectorParseError(_))));
         }
         // If Selector::parse doesn't error on this specific string, the test still passes,
