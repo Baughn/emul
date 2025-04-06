@@ -3,13 +3,13 @@ use crate::db::LogEntry;
 use crate::nyaa_parser;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _}; // Base64 encoding
-use lru::LruCache;
+// Removed unused: use lru::LruCache;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::num::NonZeroUsize;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+// Removed unused: use std::num::NonZeroUsize;
+// Removed unused: use std::sync::Arc;
+// Removed unused: use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
 

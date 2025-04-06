@@ -14,12 +14,12 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 // Type alias for the image cache: URL -> (MimeType, Base64Data)
-type ImageCache = Arc<Mutex<LruCache<String, (String, String)>>>;
+pub type ImageCache = Arc<Mutex<LruCache<String, (String, String)>>>; // Make public
 const IMAGE_CACHE_SIZE: usize = 20; // Store info for the last 20 image URLs
 
 // Shared state for the bot
 #[derive(Clone)]
-struct BotState {
+pub struct BotState { // Make struct public too, as ImageCache is used in its field
     config: Arc<Config>,
     db_conn: DbConnection,
     current_channels: Arc<Mutex<HashSet<String>>>, // Channels bot is currently in
@@ -268,6 +268,7 @@ async fn handle_ai_request(
         history,
         &state.prompt_path,
         was_addressed,
+        &state.image_cache, // Pass the image cache
     )
     .await;
 
