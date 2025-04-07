@@ -1,7 +1,7 @@
 use crate::bot::ImageCache; // Import the cache type
 use crate::db::LogEntry;
 use crate::nyaa_parser;
-use crate::readability::extractor; // For HTML content extraction
+use readability::extractor; // For HTML content extraction
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _}; // Base64 encoding
 // Removed unused: use lru::LruCache;
@@ -396,7 +396,7 @@ async fn read_webpage_content(page_url: &str) -> Result<String> {
 
     // 4. Extract content using readability
     // Use Cursor to provide Read trait input
-    let product = extractor::extract(Cursor::new(html_content), &url)
+    let product = extractor::extract(&mut Cursor::new(html_content), &url)
         .map_err(|e| anyhow!("Failed to extract content using readability: {}", e))?;
 
     tracing::info!(url = %page_url, extracted_chars = product.text.len(), "Successfully extracted content");
@@ -991,8 +991,8 @@ mod tests {
          let channel = "#test";
          let nick = "tester";
          // Use the file listing page provided by the user
-         let page_url = "https://brage.info/Anime/A_Channel__The_Animation/";
-         let message = format!("Can you tell me what this page is about? {}", page_url);
+         let page_url = "https://blog.rust-lang.org/2025/04/03/Rust-1.86.0.html";
+         let message = format!("Is trait upcasting mentiong on {}? Answer only yes or no, unless there's an error.", page_url);
          let history = Vec::new();
          let image_cache: ImageCache = Arc::new(Mutex::new(LruCache::new(
              NonZeroUsize::new(10).unwrap(),
@@ -1013,12 +1013,11 @@ mod tests {
              json!({"url": page_url})
          );
  
-         // Check that the final text response seems relevant (e.g., contains file names or path)
-         // Readability might extract the file list or just the title/path.
+         // Check that the final text response seems relevant
          assert!(!response.text_response.is_empty());
          let lower_response = response.text_response.to_lowercase();
          assert!(
-             lower_response.contains("a_channel") || lower_response.contains(".mkv"),
+             lower_response.contains("yes"),
              "Response doesn't seem related to the file listing page content. Response: {}", response.text_response
          );
      }
