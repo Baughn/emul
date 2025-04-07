@@ -281,9 +281,19 @@ async fn fetch_and_prepare_image(
                 let format = ImageFormat::from_mime_type(&content_type)
                     .unwrap_or(ImageFormat::Png); // Default to PNG if format unknown/unsupported
 
-                resized_img
-                    .write_to(&mut Cursor::new(&mut encoded_bytes), format)
-                    .context("Failed to encode resized image")?;
+                // Convert to RGB8 before encoding if the target is JPEG, as JPEG doesn't support alpha
+                if format == ImageFormat::Jpeg {
+                    let rgb_img = resized_img.to_rgb8();
+                    rgb_img
+                        .write_to(&mut Cursor::new(&mut encoded_bytes), format)
+                        .context("Failed to encode resized image as JPEG")?;
+                } else {
+                    // For other formats (PNG, GIF, WebP), encode directly
+                    resized_img
+                        .write_to(&mut Cursor::new(&mut encoded_bytes), format)
+                        .context("Failed to encode resized image")?;
+                }
+
 
                 tracing::info!(
                     %url,
