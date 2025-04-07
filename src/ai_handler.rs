@@ -6,16 +6,19 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 // Removed unused: use lru::LruCache;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use image::{imageops::FilterType, ImageFormat}; // Image processing
 use serde_json::{json, Value};
 // Removed unused: use std::num::NonZeroUsize;
 // Removed unused: use std::sync::Arc;
 // Removed unused: use tokio::sync::Mutex;
+use std::io::Cursor; // For image encoding
 use tokio::time::{timeout, Duration};
 
 
 const MAX_FUNCTION_CALL_TURNS: usize = 2; // Max rounds of function calls before forcing text
 const API_TIMEOUT: Duration = Duration::from_secs(60); // Timeout for each API call
-const MAX_IMAGE_SIZE_BYTES: usize = 4 * 1024 * 1024; // Limit image download size (e.g., 4MB) to avoid excessive memory/token use
+const MAX_IMAGE_SIZE_BYTES: usize = 20 * 1024 * 1024; // Limit image download size (e.g., 20MB)
+const MAX_IMAGE_PIXELS: u32 = 1_000_000; // Limit image resolution (1 megapixel)
 
 /// Formats chat history for the AI prompt.
 /// Consider adding timestamps or adjusting formatting as needed for your AI.
@@ -247,6 +250,77 @@ async fn fetch_and_prepare_image(
         let mut cache_locked = cache.lock().await;
         cache_locked.put(url.to_string(), (content_type.clone(), base64_data.clone()));
         tracing::info!(%url, mime_type=%content_type, "Image stored in cache");
+    } // Release lock
+
+    // 5. Decode, Resize if necessary, and Re-encode
+    let final_image_bytes = match image::load_from_memory(&image_bytes) {
+        Ok(img) => {
+            let (width, height) = img.dimensions();
+            let current_pixels = width * height;
+
+            if current_pixels > MAX_IMAGE_PIXELS {
+                tracing::info!(
+                    %url,
+                    current_width = width,
+                    current_height = height,
+                    current_pixels,
+                    max_pixels = MAX_IMAGE_PIXELS,
+                    "Image exceeds pixel limit, resizing."
+                );
+
+                let ratio = (MAX_IMAGE_PIXELS as f64 / current_pixels as f64).sqrt();
+                let new_width = (width as f64 * ratio).round() as u32;
+                let new_height = (height as f64 * ratio).round() as u32;
+
+                // Resize using Lanczos3 for good quality
+                let resized_img =
+                    image::imageops::resize(&img, new_width, new_height, FilterType::Lanczos3);
+
+                // Re-encode the image back to bytes
+                let mut encoded_bytes = Vec::new();
+                let format = ImageFormat::from_mime_type(&content_type)
+                    .unwrap_or(ImageFormat::Png); // Default to PNG if format unknown/unsupported
+
+                resized_img
+                    .write_to(&mut Cursor::new(&mut encoded_bytes), format)
+                    .context("Failed to encode resized image")?;
+
+                tracing::info!(
+                    %url,
+                    new_width,
+                    new_height,
+                    new_size_bytes = encoded_bytes.len(),
+                    format = ?format,
+                    "Image resized and re-encoded."
+                );
+                encoded_bytes // Use the resized bytes
+            } else {
+                // Image is within pixel limits, use original bytes
+                tracing::debug!(%url, pixels=current_pixels, "Image within pixel limits, using original bytes.");
+                image_bytes.to_vec() // Convert Bytes to Vec<u8>
+            }
+        }
+        Err(e) => {
+            // If decoding fails, maybe it wasn't a valid image despite mime type?
+            tracing::error!(%url, error=%e, "Failed to decode image bytes, skipping resize.");
+            // Fallback to using original bytes, maybe the AI can handle it? Or bail?
+            // For now, let's proceed with original bytes but log the error.
+             image_bytes.to_vec() // Convert Bytes to Vec<u8>
+             // Alternatively, bail:
+             // bail!("Failed to decode image from URL {}: {}", url, e);
+        }
+    };
+
+
+    // 6. Encode final bytes as Base64
+    let base64_data = BASE64_STANDARD.encode(&final_image_bytes);
+
+    // 7. Store in cache (using original mime type, but potentially resized data)
+    {
+        let mut cache_locked = cache.lock().await;
+        // Store the original mime type, but the potentially resized base64 data
+        cache_locked.put(url.to_string(), (content_type.clone(), base64_data.clone()));
+        tracing::info!(%url, mime_type=%content_type, "Image data (potentially resized) stored in cache");
     } // Release lock
 
     Ok((content_type, base64_data))
