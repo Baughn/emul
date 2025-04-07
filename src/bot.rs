@@ -257,6 +257,99 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
     Ok(())
 }
 
+// --- New Function: Background task to process completed messages from buffer ---
+async fn message_buffer_sweeper(sender: Sender, state: BotState) {
+    tracing::debug!("Message buffer sweeper task started.");
+    loop {
+        tokio::time::sleep(MESSAGE_SWEEPER_INTERVAL).await;
+
+        let mut buffer = state.message_buffer.lock().await;
+        let now = Instant::now();
+        let mut messages_to_process = Vec::new();
+
+        // Identify and collect messages that have timed out
+        buffer.retain(|(channel, nick), buffered_msg| {
+            if now.duration_since(buffered_msg.last_arrival) > MESSAGE_BUFFER_TIMEOUT {
+                tracing::debug!(%channel, %nick, "Message buffer timed out, processing.");
+                messages_to_process.push((
+                    channel.clone(),
+                    nick.clone(),
+                    buffered_msg.message.clone(), // Clone message to process outside lock
+                ));
+                false // Remove from buffer
+            } else {
+                true // Keep in buffer
+            }
+        });
+
+        // Drop the lock before potentially long-running processing
+        drop(buffer);
+
+        // Spawn processing tasks for each completed message
+        for (channel, nick, message) in messages_to_process {
+            let sender_clone = sender.clone();
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                 if let Err(e) = process_complete_message(sender_clone, state_clone, channel, nick, message).await {
+                     tracing::error!("Error processing completed message: {:?}", e);
+                 }
+            });
+        }
+    }
+    // Note: This loop runs indefinitely. If graceful shutdown is needed, add cancellation logic.
+}
+
+
+// --- New Function: Process a fully assembled message ---
+async fn process_complete_message(
+    sender: Sender,
+    state: BotState,
+    channel: String,
+    nick: String,
+    complete_message: String,
+) -> Result<()> {
+    tracing::debug!(%channel, %nick, msg=%complete_message, "Processing complete message");
+
+    // 1. Log the complete message
+    // Use a separate connection lock scope
+    {
+        let conn = state.db_conn.lock().await;
+        db::log_message(&conn, &channel, &nick, &complete_message)?;
+    } // Lock released here
+
+    // 2. Check if AI should be triggered
+    let bot_nick_lower = state.config.nickname.to_lowercase();
+    let msg_lower = complete_message.to_lowercase();
+    // Re-evaluate addressing based on the complete message
+    let is_addressed = msg_lower.starts_with(&format!("{}:", bot_nick_lower))
+        || msg_lower.starts_with(&format!("{},", bot_nick_lower))
+        || msg_lower.split_whitespace().next() == Some(&bot_nick_lower)
+        || (msg_lower.contains(format!(" {}", bot_nick_lower).as_str())
+            && (state.bn_interject_mention.should_interject()
+                || ai_handler::chatbot_mentioned(&state.config.nickname, &complete_message).await?)); // Pass complete message
+
+    let should_trigger_ai = is_addressed || state.bn_interject.should_interject();
+
+    // 3. Spawn AI task if needed
+    if should_trigger_ai {
+        tracing::info!(%channel, %nick, addressed=%is_addressed, "Triggering AI for completed message");
+        // Spawn AI task, passing the complete message
+        tokio::spawn(handle_ai_request(
+            sender, // Pass the sender clone
+            state,  // Pass the state clone
+            channel, // Pass channel ownership
+            nick,    // Pass nick ownership
+            complete_message, // Pass the complete message
+            is_addressed,
+        ));
+    } else {
+        tracing::debug!(%channel, %nick, "No AI trigger for completed message");
+    }
+
+    Ok(())
+}
+
+
 /// Task to handle fetching history, calling AI, and sending response
 async fn handle_ai_request(
     sender: irc::client::Sender,
