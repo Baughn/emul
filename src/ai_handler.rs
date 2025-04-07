@@ -358,6 +358,61 @@ async fn fetch_and_prepare_image(
 }
 
 
+/// Fetches a webpage, extracts the main content text using readability.
+async fn read_webpage_content(page_url: &str) -> Result<String> {
+    tracing::info!(url = %page_url, "Attempting to read webpage content");
+
+    // Parse the URL to provide a base for readability
+    let url = Url::parse(page_url).context("Invalid URL provided for reading")?;
+
+    // 1. Fetch page content
+    let client = reqwest::Client::new();
+    let response = client.get(url.clone()) // Use the parsed URL
+        .timeout(Duration::from_secs(20)) // Timeout for fetching HTML
+        .send()
+        .await
+        .context("Failed to send request for webpage URL")?
+        .error_for_status() // Ensure success status (2xx)
+        .context("Webpage URL returned error status")?;
+
+    // 2. Check Content-Type (optional but recommended)
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|val| val.to_str().ok())
+        .map(|ct| ct.split(';').next().unwrap_or(ct).trim().to_lowercase())
+        .unwrap_or_default();
+
+    if !content_type.starts_with("text/html") {
+        bail!("URL does not appear to be an HTML page (Content-Type: {})", content_type);
+    }
+
+    // 3. Read HTML content
+    // Consider adding a size limit here too if very large pages are a concern
+    let html_content = response
+        .text()
+        .await
+        .context("Failed to read webpage content as text")?;
+
+    // 4. Extract content using readability
+    // Use Cursor to provide Read trait input
+    let product = extractor::extract(Cursor::new(html_content), &url)
+        .map_err(|e| anyhow!("Failed to extract content using readability: {}", e))?;
+
+    tracing::info!(url = %page_url, extracted_chars = product.text.len(), "Successfully extracted content");
+
+    // 5. Truncate if necessary
+    let mut extracted_text = product.text;
+    if extracted_text.len() > MAX_EXTRACTED_TEXT_LENGTH {
+        tracing::warn!(url = %page_url, original_len = extracted_text.len(), max_len = MAX_EXTRACTED_TEXT_LENGTH, "Truncating extracted text");
+        extracted_text.truncate(MAX_EXTRACTED_TEXT_LENGTH);
+        extracted_text.push_str("... [truncated]");
+    }
+
+    Ok(extracted_text)
+}
+
+
 /// Placeholder for initiating a torrent download.
 /// In a real implementation, this would likely send a message to a download manager/client.
 /// For now, it extracts the magnet link and confirms initiation.
@@ -587,6 +642,15 @@ pub async fn call_chatbot(
                         })?;
                          result_content_for_api = match download_torrent(url).await {
                             Ok(result) => json!({ "result": result }),
+                            Err(e) => json!({ "error": e.to_string() }),
+                        };
+                    }
+                    "read_webpage_content" => {
+                        let url = args["url"].as_str().ok_or_else(|| {
+                            anyhow!("Missing 'url' argument for read_webpage_content")
+                        })?;
+                        result_content_for_api = match read_webpage_content(url).await {
+                            Ok(text) => json!({ "result": text }), // Return the extracted text
                             Err(e) => json!({ "error": e.to_string() }),
                         };
                     }
