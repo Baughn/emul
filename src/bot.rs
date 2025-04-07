@@ -6,16 +6,24 @@ use anyhow::Result;
 use futures::prelude::*;
 use irc::client::prelude::*;
 use lru::LruCache;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet}; // Added HashMap
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant}; // Added Instant
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 // Type alias for the image cache: URL -> (MimeType, Base64Data)
 pub type ImageCache = Arc<Mutex<LruCache<String, (String, String)>>>; // Make public
 const IMAGE_CACHE_SIZE: usize = 20; // Store info for the last 20 image URLs
+const MESSAGE_BUFFER_TIMEOUT: Duration = Duration::from_millis(1500); // 1.5 seconds
+const MESSAGE_SWEEPER_INTERVAL: Duration = Duration::from_millis(500); // Check every 0.5 seconds
+
+// Holds message fragments while waiting for potential continuations
+struct BufferedMessage {
+    message: String,
+    last_arrival: Instant,
+}
 
 // Shared state for the bot
 #[derive(Clone)]
@@ -26,7 +34,9 @@ pub struct BotState { // Make struct public too, as ImageCache is used in its fi
     prompt_path: Arc<std::path::PathBuf>, // Path to the prompt file
     bn_interject: BlueNoiseInterjecter,
     bn_interject_mention: BlueNoiseInterjecter,
-    image_cache: ImageCache, // Add the image cache
+    image_cache: ImageCache,
+    // Buffer for potentially fragmented messages: (Channel, Nick) -> BufferedMessage
+    message_buffer: Arc<Mutex<HashMap<(String, String), BufferedMessage>>>,
 }
 
 const INITIAL_RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -83,10 +93,11 @@ pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
             bn_interject_mention: BlueNoiseInterjecter::new(RANDOM_INTERJECT_CHANCE_IF_MENTIONED),
             image_cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(IMAGE_CACHE_SIZE).unwrap(),
-            ))), // Initialize the cache
+            ))),
+            message_buffer: Arc::new(Mutex::new(HashMap::new())), // Initialize buffer
         };
 
-        // --- Stream and Client Arc ---
+        // --- Stream, Client Arc, and Sweeper Task ---
         let stream_result = client.stream();
         let mut stream = match stream_result {
             Ok(s) => s,
@@ -98,6 +109,13 @@ pub async fn run_bot(config: Config, db_conn: DbConnection) -> Result<()> {
             }
         };
         let client_arc = Arc::new(client); // Keep original client ownership here for now
+        let sender = client_arc.sender(); // Get sender for sweeper
+
+        // --- Start Message Buffer Sweeper Task ---
+        let state_for_sweeper = state.clone();
+        tokio::spawn(async move {
+            message_buffer_sweeper(sender, state_for_sweeper).await;
+        });
 
         // --- Main Event Loop ---
         loop { // Inner loop for message processing
@@ -198,34 +216,34 @@ async fn handle_message(client: Arc<Client>, state: BotState, message: Message) 
             } else if target.starts_with('#') {
                 // Public message in a channel
                 let channel = target;
-                // Log the message first
-                db::log_message(&*state.db_conn.lock().await, channel, source_nick, msg)?;
+                let nick = source_nick;
 
-                // Check if addressed or random chance
-                let bot_nick_lower = state.config.nickname.to_lowercase();
-                let msg_lower = msg.to_lowercase();
-                let is_addressed = msg_lower.starts_with(&format!("{}:", bot_nick_lower))
-                    || msg_lower.starts_with(&format!("{},", bot_nick_lower))
-                    || msg_lower.split_whitespace().next() == Some(&bot_nick_lower)
-                    || (msg.to_lowercase().contains(format!(" {}", bot_nick_lower).as_str())
-                        && (state.bn_interject_mention.should_interject() || ai_handler::chatbot_mentioned(&state.config.nickname, msg).await?));
+                // --- Message Buffering Logic ---
+                let mut buffer = state.message_buffer.lock().await;
+                let key = (channel.to_string(), nick.to_string());
+                let now = Instant::now();
 
-                let should_trigger_ai =
-                    is_addressed || state.bn_interject.should_interject();
-
-                if should_trigger_ai {
-                    // Spawn AI task
-                    tokio::spawn(handle_ai_request(
-                        client.sender(),
-                        state.clone(),
-                        channel.to_string(),
-                        source_nick.to_string(),
-                        msg.to_string(), // Pass original message for context if needed
-                        is_addressed,
-                    ));
-                }
+                buffer
+                    .entry(key)
+                    .and_modify(|entry| {
+                        entry.message.push(' '); // Add space between fragments
+                        entry.message.push_str(msg);
+                        entry.last_arrival = now;
+                        tracing::trace!(%channel, %nick, "Appended message fragment");
+                    })
+                    .or_insert_with(|| {
+                        tracing::trace!(%channel, %nick, "Started buffering message");
+                        BufferedMessage {
+                            message: msg.to_string(),
+                            last_arrival: now,
+                        }
+                    });
+                // Drop the lock explicitly before any potential await points if needed later
+                drop(buffer);
+                // --- End Message Buffering Logic ---
+                // NOTE: Actual processing (logging, AI trigger) is now handled by the sweeper task
             } else {
-                tracing::warn!(%target, "Unknown message target");
+                tracing::warn!(%target, "Unknown message target type");
             }
         }
         // Handle other commands if needed (PING/PONG is automatic)
