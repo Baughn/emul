@@ -872,7 +872,7 @@ mod tests {
 
         // 3. Check cache state (optional, confirms item is present)
         {
-            let mut cache_locked = cache.lock().await;
+            let cache_locked = cache.lock().await;
             assert!(cache_locked.contains(image_url));
         }
     }
