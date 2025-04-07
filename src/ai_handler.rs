@@ -283,12 +283,14 @@ async fn fetch_and_prepare_image(
 
                 // Convert to RGB8 before encoding if the target is JPEG, as JPEG doesn't support alpha
                 if format == ImageFormat::Jpeg {
-                    let rgb_img = resized_img.to_rgb8();
+                    // Convert the potentially RGBA buffer to RGB8 for JPEG encoding
+                    let rgb_img = image::DynamicImage::from(resized_img).to_rgb8(); // Convert via DynamicImage
                     rgb_img
                         .write_to(&mut Cursor::new(&mut encoded_bytes), format)
                         .context("Failed to encode resized image as JPEG")?;
                 } else {
                     // For other formats (PNG, GIF, WebP), encode directly
+                    // Note: resized_img might still be RGBA here if the original was RGBA
                     resized_img
                         .write_to(&mut Cursor::new(&mut encoded_bytes), format)
                         .context("Failed to encode resized image")?;
