@@ -6,7 +6,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 // Removed unused: use lru::LruCache;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use image::{imageops::FilterType, ImageFormat}; // Image processing
+use image::{imageops::FilterType, GenericImageView, ImageFormat}; // Image processing
 use serde_json::{json, Value};
 // Removed unused: use std::num::NonZeroUsize;
 // Removed unused: use std::sync::Arc;
