@@ -94,5 +94,5 @@ Contributions are welcome! Please feel free to open issues or pull requests.
 
 ## License
 
-(Consider adding a license file, e.g., MIT or Apache 2.0)
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 ```
