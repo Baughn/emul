@@ -769,4 +769,76 @@ mod tests {
          assert!(result.is_ok());
          assert!(!result.unwrap()); // Should be false (mention)
      }
+
+    #[tokio::test]
+    #[ignore] // Ignored by default as it calls external URLs
+    async fn test_fetch_and_prepare_image_live() {
+        // No API key needed here, but good practice for consistency if other helpers use it
+        // ensure_api_key();
+        let image_url = "https://brage.info/GAN/ganbot2/cd41b2a5-d982-468e-b927-c324a05ba20e.0.jpeg";
+        let cache: ImageCache = Arc::new(Mutex::new(LruCache::new(
+            NonZeroUsize::new(10).unwrap(), // Cache size 10
+        )));
+
+        // 1. First call (cache miss)
+        let result1 = fetch_and_prepare_image(image_url, &cache).await;
+        println!("fetch_and_prepare_image (1st call) result: {:?}", result1);
+        assert!(result1.is_ok());
+        let (mime1, data1) = result1.unwrap();
+        assert_eq!(mime1, "image/jpeg");
+        assert!(!data1.is_empty());
+
+        // 2. Second call (cache hit)
+        let result2 = fetch_and_prepare_image(image_url, &cache).await;
+        println!("fetch_and_prepare_image (2nd call) result: {:?}", result2);
+        assert!(result2.is_ok());
+        let (mime2, data2) = result2.unwrap();
+        assert_eq!(mime2, "image/jpeg");
+        assert_eq!(data1, data2); // Data should be identical from cache
+
+        // 3. Check cache state (optional, confirms item is present)
+        {
+            let mut cache_locked = cache.lock().await;
+            assert!(cache_locked.contains(image_url));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore] // Ignored by default as it calls the real API and external URLs
+    async fn test_call_chatbot_with_image_live() {
+        ensure_api_key();
+        let (_temp_file, prompt_path) = create_dummy_prompt_file().await.unwrap();
+        let channel = "#test";
+        let nick = "tester";
+        let image_url = "https://brage.info/GAN/ganbot2/cd41b2a5-d982-468e-b927-c324a05ba20e.0.jpeg";
+        let message = format!("What animal is in this picture? {}", image_url);
+        let history = Vec::new();
+        let image_cache: ImageCache = Arc::new(Mutex::new(LruCache::new(
+            NonZeroUsize::new(10).unwrap(),
+        )));
+
+        let result = call_chatbot(channel, nick, &message, history, &prompt_path, true, &image_cache).await;
+        println!("call_chatbot (image) result: {:?}", result); // Print for debugging
+
+        assert!(result.is_ok());
+        let response = result.unwrap();
+
+        // Check that the image tool was invoked
+        assert!(!response.invoked_tools.is_empty());
+        let image_tool_call = response.invoked_tools.iter().find(|t| t.name == "fetch_and_prepare_image");
+        assert!(image_tool_call.is_some());
+        assert_eq!(
+            image_tool_call.unwrap().args,
+            json!({"url": image_url})
+        );
+
+        // Check that the final text response mentions the animal
+        assert!(!response.text_response.is_empty());
+        let lower_response = response.text_response.to_lowercase();
+        // Allow for variations like "rabbit", "bunny", "hare"
+        assert!(
+            lower_response.contains("rabbit") || lower_response.contains("bunny") || lower_response.contains("hare"),
+            "Response did not mention the expected animal. Response: {}", response.text_response
+        );
+    }
 }
