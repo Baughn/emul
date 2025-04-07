@@ -12,11 +12,13 @@ use serde_json::{json, Value};
 // Removed unused: use std::sync::Arc;
 // Removed unused: use tokio::sync::Mutex;
 use std::io::Cursor; // For image encoding
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 
 const MAX_FUNCTION_CALL_TURNS: usize = 2; // Max rounds of function calls before forcing text
-const API_TIMEOUT: Duration = Duration::from_secs(60); // Timeout for each API call
+const API_TIMEOUT: Duration = Duration::from_secs(60); // Timeout for each API call attempt
+const MAX_API_RETRIES: usize = 3; // Max number of retries for API calls
+const INITIAL_BACKOFF_DELAY: Duration = Duration::from_secs(1); // Initial delay for retries
 const MAX_IMAGE_SIZE_BYTES: usize = 20 * 1024 * 1024; // Limit image download size (e.g., 20MB)
 const MAX_IMAGE_PIXELS: u32 = 1_000_000; // Limit image resolution (1 megapixel)
 
@@ -445,30 +447,24 @@ pub async fn call_chatbot(
 
         tracing::info!(turn = turn + 1, use_tools, "Starting AI turn");
 
-        // 3. Call Gemini API
-        let response_json = match timeout(
-            API_TIMEOUT,
-            call_gemini_with_history(
-                &system_prompt,
-                &mut conversation_history, // Pass mutable ref to potentially update history inside
-                "gemini-2.5-pro-exp-03-25",
-                tools_param,
-            ),
+        // 3. Call Gemini API (with retry logic)
+        let response_json = match call_gemini_with_retry(
+            &system_prompt,
+            &mut conversation_history, // Pass mutable ref to potentially update history inside
+            "gemini-2.5-pro-exp-03-25",
+            tools_param,
         )
         .await
         {
-            Ok(Ok(res)) => res,
-            Ok(Err(e)) => {
-                tracing::error!(error = %e, "Gemini API call failed within timeout");
+            Ok(res) => res,
+            Err(e) => {
+                tracing::error!(error = %e, "Gemini API call failed after retries");
                 // Append an error message to history? Or just bail?
                 // For now, bail.
-                return Err(e.context("Gemini API call failed"));
-            }
-            Err(_) => {
-                tracing::error!("Gemini API call timed out after {:?}", API_TIMEOUT);
-                return Err(anyhow!("Gemini API call timed out"));
+                return Err(e.context("Gemini API call failed after retries"));
             }
         };
+
 
         // --- Process Response ---
 
@@ -629,11 +625,61 @@ pub async fn call_chatbot(
 }
 
 
-/// Generic function to call the Gemini API.
-/// Can handle simple text prompts or multi-turn history including function calls/responses.
-async fn call_gemini_with_history(
+/// Calls the Gemini API with retry logic and exponential backoff.
+async fn call_gemini_with_retry(
     system_prompt: &str,
-    history: &mut Vec<Value>, // Use Value for flexibility with history parts
+    history: &mut Vec<Value>,
+    model_version: &str,
+    tools: Option<&Value>,
+) -> Result<Value> {
+    let mut attempts = 0;
+    let mut delay = INITIAL_BACKOFF_DELAY;
+
+    loop {
+        attempts += 1;
+        tracing::debug!(attempt = attempts, max_attempts = MAX_API_RETRIES + 1, "Attempting Gemini API call");
+
+        match timeout(API_TIMEOUT, call_gemini_with_history_attempt(
+            system_prompt,
+            history, // Pass mutable ref down
+            model_version,
+            tools,
+        )).await {
+            Ok(Ok(response)) => return Ok(response), // Success within timeout
+            Ok(Err(e)) => { // Inner function returned an error
+                tracing::warn!(attempt = attempts, error = %e, "Gemini API attempt failed");
+                if attempts > MAX_API_RETRIES {
+                    tracing::error!("Gemini API call failed after {} attempts.", attempts);
+                    return Err(e.context(format!("Gemini API call failed after {} attempts", attempts)));
+                }
+                // Decide if retryable (could be more sophisticated based on error type)
+                // For now, retry on most errors except perhaps validation errors if identifiable.
+                // The "Missing candidates" error is handled inside call_gemini_with_history_attempt
+                // but other errors like network issues will trigger retry here.
+            }
+            Err(_) => { // Timeout occurred
+                tracing::warn!(attempt = attempts, timeout = ?API_TIMEOUT, "Gemini API attempt timed out");
+                 if attempts > MAX_API_RETRIES {
+                    tracing::error!("Gemini API call timed out after {} attempts.", attempts);
+                    return Err(anyhow!("Gemini API call timed out after {} attempts", attempts));
+                }
+                // Timeout is considered retryable
+            }
+        }
+
+        // If we reach here, we need to retry
+        tracing::info!(delay = ?delay, "Waiting before next Gemini API retry");
+        sleep(delay).await;
+        delay *= 2; // Exponential backoff
+    }
+}
+
+
+/// Represents a single attempt to call the Gemini API. Called by `call_gemini_with_retry`.
+/// Handles the actual HTTP request and basic response validation.
+async fn call_gemini_with_history_attempt(
+    system_prompt: &str,
+    history: &mut Vec<Value>, // Use Value for flexibility with history parts - still mutable if needed later
     model_version: &str,
     tools: Option<&Value>, // Optional tools configuration
 ) -> Result<Value> {
@@ -702,8 +748,8 @@ async fn call_gemini_with_history(
 async fn fast_gemini(system_prompt: &str, prompt: &str) -> Result<String> {
     // For a single prompt, create a simple history
     let mut history = vec![json!({"role": "user", "parts": [{"text": prompt}]})];
-    // Call without tools
-    let response_json = call_gemini_with_history(system_prompt, &mut history, "gemini-2.5-pro-exp-03-25", None).await?;
+    // Call with retry logic, but without tools
+    let response_json = call_gemini_with_retry(system_prompt, &mut history, "gemini-2.5-pro-exp-03-25", None).await?;
 
     // Extract text part, assuming no function call for this simple use case
     let response_text = response_json
