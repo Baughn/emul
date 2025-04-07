@@ -1,6 +1,7 @@
 use crate::bot::ImageCache; // Import the cache type
 use crate::db::LogEntry;
 use crate::nyaa_parser;
+use crate::readability::extractor; // For HTML content extraction
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _}; // Base64 encoding
 // Removed unused: use lru::LruCache;
@@ -11,6 +12,7 @@ use serde_json::{json, Value};
 // Removed unused: use std::num::NonZeroUsize;
 // Removed unused: use std::sync::Arc;
 // Removed unused: use tokio::sync::Mutex;
+use url::Url; // For parsing URLs
 use std::io::Cursor; // For image encoding
 use tokio::time::{sleep, timeout, Duration};
 
@@ -21,6 +23,7 @@ const MAX_API_RETRIES: usize = 3; // Max number of retries for API calls
 const INITIAL_BACKOFF_DELAY: Duration = Duration::from_secs(1); // Initial delay for retries
 const MAX_IMAGE_SIZE_BYTES: usize = 20 * 1024 * 1024; // Limit image download size (e.g., 20MB)
 const MAX_IMAGE_PIXELS: u32 = 1_000_000; // Limit image resolution (1 megapixel)
+const MAX_EXTRACTED_TEXT_LENGTH: usize = 15000; // Limit the length of extracted text (chars)
 
 /// Formats chat history for the AI prompt.
 /// Consider adding timestamps or adjusting formatting as needed for your AI.
@@ -101,6 +104,20 @@ fn get_tools_json() -> Value {
                             "url": {
                                 "type": "string",
                                 "description": "The full URL of the image file (e.g., ending in .jpg, .png, .webp)."
+                            }
+                        },
+                        "required": ["url"]
+                    }
+                },
+                {
+                    "name": "read_webpage_content",
+                    "description": "Fetches a webpage URL, extracts the main article text (like reader mode), and returns it.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {
+                                "type": "string",
+                                "description": "The full URL of the webpage to read."
                             }
                         },
                         "required": ["url"]
@@ -901,7 +918,47 @@ mod tests {
          assert!(result.is_ok());
          assert!(!result.unwrap()); // Should be false (mention)
      }
-
+ 
+     #[tokio::test]
+     #[ignore] // Ignored by default as it calls the real API and external sites
+     async fn test_call_chatbot_read_webpage_live() {
+         ensure_api_key();
+         let (_temp_file, prompt_path) = create_dummy_prompt_file().await.unwrap();
+         let channel = "#test";
+         let nick = "tester";
+         // Use the file listing page provided by the user
+         let page_url = "https://brage.info/Anime/A_Channel__The_Animation/";
+         let message = format!("Can you tell me what this page is about? {}", page_url);
+         let history = Vec::new();
+         let image_cache: ImageCache = Arc::new(Mutex::new(LruCache::new(
+             NonZeroUsize::new(10).unwrap(),
+         )));
+ 
+         let result = call_chatbot(channel, nick, &message, history, &prompt_path, true, &image_cache).await;
+         println!("call_chatbot (read webpage) result: {:?}", result); // Print for debugging
+ 
+         assert!(result.is_ok());
+         let response = result.unwrap();
+ 
+         // Check that the correct tool was invoked
+         assert!(!response.invoked_tools.is_empty());
+         let read_tool_call = response.invoked_tools.iter().find(|t| t.name == "read_webpage_content");
+         assert!(read_tool_call.is_some(), "read_webpage_content tool was not invoked");
+         assert_eq!(
+             read_tool_call.unwrap().args,
+             json!({"url": page_url})
+         );
+ 
+         // Check that the final text response seems relevant (e.g., contains file names or path)
+         // Readability might extract the file list or just the title/path.
+         assert!(!response.text_response.is_empty());
+         let lower_response = response.text_response.to_lowercase();
+         assert!(
+             lower_response.contains("a_channel") || lower_response.contains(".mkv"),
+             "Response doesn't seem related to the file listing page content. Response: {}", response.text_response
+         );
+     }
+ 
     #[tokio::test]
     #[ignore] // Ignored by default as it calls external URLs
     async fn test_fetch_and_prepare_image_live() {
